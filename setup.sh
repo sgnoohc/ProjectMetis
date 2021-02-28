@@ -2,7 +2,7 @@
 
 [ ! -z "$CMSSW_BASE" ] || {
     [ -e /cvmfs/ ] && {
-        source /code/osgcode/cmssoft/cms/cmsset_default.sh
+        source /cvmfs/cms.cern.ch/cmsset_default.sh
         cd /cvmfs/cms.cern.ch/slc6_amd64_gcc630/cms/cmssw/CMSSW_9_4_9/ && eval `scramv1 runtime -sh` && cd -
         # source /cvmfs/cms.cern.ch/crab3/crab.sh
     }

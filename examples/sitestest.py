@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 import time
 import os
 import glob
@@ -32,21 +34,20 @@ python sitestest.py >> log_sitestest.txt
 """
 
 def print_summary_string(statuses):
-    print "Summary: ",
+    print("Summary: ", end="")
     for site,done in sorted(statuses.items()):
         col = "\033[00;32m"
         if not done:
             col = "\033[00;31m"
-        print "{}{}\033[0m  ".format(col,site),
-    print
+        print("{}{}\033[0m  ".format(col,site), end="")
+    print()
 
 def get_task_fast(daystr,site):
     # dummy pset -- 1-5mins
     return CMSSWTask(
             sample = FilelistSample(
                 dataset="/SiteTest/{}/TEST".format(site),
-                # copied a single miniaod file to hadoop and put the proper event count here
-                filelist=[["/store/user/namin/test/68753E9C-6D5E-E811-BC40-24BE05C4D821.root", 3334]],
+                filelist=[["/store/mc/RunIIFall17MiniAODv2/DYJetsToLL_M-50_TuneCP5_13TeV-amcatnloFXFX-pythia8/MINIAODSIM/PU2017_12Apr2018_94X_mc2017_realistic_v14-v1/10000/0CAD0E35-8B42-E811-99FD-008CFAC91E10.root", 24762]],
                 ),
             output_name = "output.root",
             tag = "v1_{}".format(daystr),
@@ -54,32 +55,13 @@ def get_task_fast(daystr,site):
             cmssw_version = "CMSSW_9_4_9",
             special_dir = "metis_site_tests/{}/".format(daystr),
             scram_arch = "slc6_amd64_gcc630",
-            condor_submit_params = {"sites":site},
-    )
-
-def get_task_cms4(daystr,site):
-    # cms4 task -- 15-30mins
-    return CMSSWTask(
-            sample = FilelistSample(
-                dataset="/SiteTest/{}/CMS4".format(site),
-                # copied a single miniaod file to hadoop and put the proper event count here
-                # filelist=[["/store/user/namin/test/68753E9C-6D5E-E811-BC40-24BE05C4D821.root", 3334]],
-                filelist=[["/store/mc/RunIIFall17MiniAODv2/W1JetsToLNu_TuneCP5_13TeV-madgraphMLM-pythia8/MINIAODSIM/PU2017_12Apr2018_94X_mc2017_realistic_v14-v3/10000/0E0FEA9A-DDA4-E811-98CE-008CFAF554D2.root", 1122]],
-                ),
-            output_name = "output.root",
-            tag = "v1_{}".format(daystr),
-            pset = "psets_cms4/main_pset_V09-04-17_fast.py",
-            pset_args = "data=False",
-            cmssw_version = "CMSSW_9_4_9",
-            special_dir = "metis_site_tests/{}/".format(daystr),
-            scram_arch = "slc6_amd64_gcc630",
-            tarfile = "/nfs-7/userdata/libCMS3/lib_CMS4_V09-04-19_949.tar.gz",
-            # condor_submit_params = {"sites":site},
             condor_submit_params = {
                 "sites":site,
-                # "requirements_line":"Requirements =",
+                "classads": [
+                    ["SingularityImage","/cvmfs/singularity.opensciencegrid.org/cmssw/cms:rhel6-m202006"],
+                    ["JobBatchName","test_{}".format(daystr)],
+                    ],
                 },
-            # recopy_inputs = True,
     )
 
 def get_parsed_info(globber="tasks/CMSSWTask*v1*/*.pkl"):
@@ -88,7 +70,7 @@ def get_parsed_info(globber="tasks/CMSSWTask*v1*/*.pkl"):
         return datetime.datetime.strptime(re.findall(r"[0-9]{4}-[0-9]{2}-[0-9]{2}",pf)[0],"%Y-%m-%d")
 
     def get_sitename(pf):
-        return pf.split("SiteTest_",1)[1].split("_CMS4",1)[0]
+        return pf.split("SiteTest_",1)[1].split("_TEST",1)[0]
 
     def parse(pf):
         with open(pf,"r") as fh:
@@ -117,14 +99,14 @@ def get_parsed_info(globber="tasks/CMSSWTask*v1*/*.pkl"):
         with open("parsed.pkl","r") as fhin:
             already_parsed = pickle.load(fhin)
     except: pass
-    print "Already parsed {} tasks".format(len(already_parsed))
+    print("Already parsed {} tasks".format(len(already_parsed)))
     already_parsed_pairs = map(lambda x:(x["sitename"], x["dt"]), already_parsed)
     pfs = glob.glob(globber)
     now = datetime.datetime.now()
     toparse = [pf for pf in pfs if 
             ((get_sitename(pf),get_dtobj(pf)) not in already_parsed_pairs) or ((get_dtobj(pf)-now).days<=1)
             ]
-    print "Parsing {} new tasks".format(len(toparse))
+    print("Parsing {} new tasks".format(len(toparse)))
     with open("parsed.pkl","w") as fhout:
         already_parsed += map(parse,toparse)
         pickle.dump(already_parsed, fhout)
@@ -173,7 +155,7 @@ def write_html_table(fname="badsites.html"):
     buff += "<table>\n"
     buff += "  <tr>\n"
     for site in [""]+all_sites:
-        buff += "    <th>{}</th>\n".format(site)
+        buff += "    <th style='font-size: 50%'>{}</th>\n".format(site)
     buff += "  </tr>\n"
     for dtobj in all_dtobjs:
         buff += " <tr>\n"
@@ -196,7 +178,7 @@ def write_html_table(fname="badsites.html"):
     buff += "</html>\n"
     with open(fname,"w") as fh:
         fh.write(buff)
-    print "Wrote {}".format(fname)
+    print("Wrote {}".format(fname))
 
 
 if __name__ == "__main__":
@@ -206,25 +188,33 @@ if __name__ == "__main__":
     sites = [
             "T2_US_UCSD",
             "T2_US_Caltech",
-            "T2_US_Wisconsin",
             "T2_US_MIT",
             "T2_US_Nebraska",
             "T2_US_Purdue",
             "T2_US_Vanderbilt",
+            "T2_US_Wisconsin",
             "T2_US_Florida",
-            "UAF",
-            "UCSB",
             "T3_US_OSG",
             "T3_US_Baylor",
             "T3_US_Colorado",
             "T3_US_NotreDame",
             "T3_US_UCR",
+            "T3_US_Rice",
+            "T3_US_UMiss",
+            "T3_US_PuertoRico",
+            "T3_US_Cornell",
+            "T3_US_FIT",
+            "T3_US_FIU",
+            "T3_US_OSU",
+            "T3_US_Rutgers",
+            "T3_US_TAMU",
+            "T3_US_TTU",
+            "T3_US_UCD",
+            "T3_US_UMD",
             ]
-    # time.sleep(60)
     statuses = {}
     for site in sites:
-        # task = get_task_fast(daystr,site)
-        task = get_task_cms4(daystr,site)
+        task = get_task_fast(daystr,site)
         isdone = task.get_outputs()[0].exists()
         if not isdone:
             task.process()

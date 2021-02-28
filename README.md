@@ -2,7 +2,6 @@
 
 [![Build Status](https://travis-ci.org/aminnj/ProjectMetis.png)](https://travis-ci.org/aminnj/ProjectMetis)
 [![Coverage Status](https://coveralls.io/repos/github/aminnj/ProjectMetis/badge.png)](https://coveralls.io/github/aminnj/ProjectMetis)
-[![Awesome Emojis](https://camo.githubusercontent.com/13c4e50d88df7178ae1882a203ed57b641674f94/68747470733a2f2f63646e2e7261776769742e636f6d2f73696e647265736f726875732f617765736f6d652f643733303566333864323966656437386661383536353265336136336531353464643865383832392f6d656469612f62616467652e737667)](https://gist.github.com/rxaviers/7360908)
 
 Concrete things that ProjectMetis can do:
 * Submission of arbitrary CMSSW jobs on a dataset (or list of files) to condor
@@ -75,16 +74,3 @@ General workflow is
 * Make changes
 * Test with `mtest` (or if it's a minor change, ignore this and let the continuous integration take care of testing)
 * Submit a PR
-
-Some design/development philosophies
-* Every commit :blue_book: should contain at least :one: emoji representing the theme of the commit. For example,
-:new: can be used with a completely new feature, :beetle: for bugs, :question: if you're unsure if something is broken
-by the commit, :anguished: to express frustration, and :poop: for those super-special commits.
-
-## TODO
-Submit a Github issue for any bug report or feature request.
-
-* We have all the ingredients to replicate CRAB submission/status functionality, so do it
-* Add more TODOs
-* On dashboard, a unique sample is specified by (datasetname,tag), not just (datasetname) as it is right now. Fix this
-

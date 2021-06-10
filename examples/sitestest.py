@@ -31,7 +31,41 @@ export PYTHONPATH=`pwd`:$PYTHONPATH
 export PATH=`pwd`/scripts:$PATH
 cd dailychecker
 python sitestest.py >> log_sitestest.txt
+
+# crontab
+# 30 5 * * * /home/users/namin/2017/ProjectMetis/examples/sites/do.sh >/dev/null 2>&1
 """
+
+allsites = [
+        "T2_US_UCSD",
+        "T2_US_Caltech",
+        "T2_US_MIT",
+        "T2_US_Nebraska",
+        "T2_US_Purdue",
+        "T2_US_Vanderbilt",
+        "T3_US_OSG",
+        "T3_US_Colorado",
+        "T3_US_NotreDame",
+        "T3_US_UMiss",
+        "T3_US_PuertoRico",
+        "T3_US_Rutgers",
+
+        # "T2_US_Florida",
+        # "T2_US_Wisconsin",
+
+        # "T3_US_UCR",
+        # "T3_US_Rice",
+#             "T3_US_Baylor",
+#             "T3_US_Cornell",
+#             "T3_US_FIT",
+#             "T3_US_FIU",
+#             "T3_US_OSU",
+#             "T3_US_TAMU",
+#             "T3_US_TTU",
+#             "T3_US_UCD",
+#             "T3_US_UMD",
+        ]
+
 
 def print_summary_string(statuses):
     print("Summary: ", end="")
@@ -122,7 +156,8 @@ def write_html_table(fname="badsites.html"):
                 "good": d["output_exists"],
                 "nretries": d["nretries"],
                 }
-    all_sites = sorted(set([x["site"] for x in slimmed.values()]))
+    # all_sites = sorted(set([x["site"] for x in slimmed.values()]))
+    all_sites = allsites
     all_dtobjs = sorted(set([x["dt"] for x in slimmed.values()]))[::-1]
 
     buff = "<html>\n"
@@ -150,8 +185,8 @@ def write_html_table(fname="badsites.html"):
     </head>
     """
     buff += "<span class='good'>success</span>\n"
-    buff += "<span class='meh'>success (with >0 retries)</span>\n"
-    buff += "<span class='bad'>failed</span>\n"
+    # buff += "<span class='meh'>success (with >0 retries)</span>\n"
+    buff += "<span class='bad'>failed/idle</span>\n"
     buff += "<table>\n"
     buff += "  <tr>\n"
     for site in [""]+all_sites:
@@ -171,7 +206,8 @@ def write_html_table(fname="badsites.html"):
                     cls = "bad"
                 else:
                     cell = "{} retries".format(d["nretries"]) if (d["nretries"] or not d["good"]) else ""
-                    cls = "good" if d["nretries"] == 0 else "meh"
+                    # cls = "good" if d["nretries"] == 0 else "meh"
+                    cls = "good"
             buff += "    <td class=\"{}\">{}</td>\n".format(cls,cell)
         buff += "  </tr>\n"
     buff += "</table>\n"
@@ -185,35 +221,8 @@ if __name__ == "__main__":
 
     # daystr = (datetime.datetime.now()-datetime.timedelta(days=1)).strftime("%Y-%m-%d")
     daystr = datetime.datetime.now().strftime("%Y-%m-%d")
-    sites = [
-            "T2_US_UCSD",
-            "T2_US_Caltech",
-            "T2_US_MIT",
-            "T2_US_Nebraska",
-            "T2_US_Purdue",
-            "T2_US_Vanderbilt",
-            "T2_US_Wisconsin",
-            "T2_US_Florida",
-            "T3_US_OSG",
-            "T3_US_Baylor",
-            "T3_US_Colorado",
-            "T3_US_NotreDame",
-            "T3_US_UCR",
-            "T3_US_Rice",
-            "T3_US_UMiss",
-            "T3_US_PuertoRico",
-            "T3_US_Cornell",
-            "T3_US_FIT",
-            "T3_US_FIU",
-            "T3_US_OSU",
-            "T3_US_Rutgers",
-            "T3_US_TAMU",
-            "T3_US_TTU",
-            "T3_US_UCD",
-            "T3_US_UMD",
-            ]
     statuses = {}
-    for site in sites:
+    for site in allsites:
         task = get_task_fast(daystr,site)
         isdone = task.get_outputs()[0].exists()
         if not isdone:

@@ -1,6 +1,7 @@
 import time
 import ROOT as r
 import argparse
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument('inputs', help='comma-separated file names')
@@ -11,7 +12,7 @@ ch = r.TChain("Events")
 for fname in args.inputs.split(","):
     fname = fname.strip()
     if fname.startswith("/store/"):
-        fname = "root://xcache-redirector.t2.ucsd.edu:2040/" + fname
+        fname = "root://xcache-redirector.t2.ucsd.edu:2042/" + fname
     ch.Add(fname)
 
 ch.SetBranchStatus("*", 0)
@@ -26,6 +27,7 @@ t0 = time.time()
 for i, evt in enumerate(ch):
     if (i == N-1) or (i % 20000 == 0):
         print("Reached entry {} in {:.2f}s".format(i, time.time()-t0))
+        sys.stdout.flush()
     pts = list(evt.Jet_pt)
     ht = sum(pt for pt in pts if pt > 40.)
     h.Fill(ht)

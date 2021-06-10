@@ -1,26 +1,23 @@
-<img src="http://i.imgur.com/oYKKgyW.png" width="350">
+# ProjectMetis
 
 [![Build Status](https://travis-ci.org/aminnj/ProjectMetis.png)](https://travis-ci.org/aminnj/ProjectMetis)
 [![Coverage Status](https://coveralls.io/repos/github/aminnj/ProjectMetis/badge.png)](https://coveralls.io/github/aminnj/ProjectMetis)
 
-Concrete things that ProjectMetis can do:
-* Submission of arbitrary CMSSW jobs on a dataset (or list of files) to condor
-  * A dataset could be a published DBS dataset, a directory (containing files), or a dataset published on [DIS](https://github.com/aminnj/dis)
-  * Arbitrary CMSSW jobs include CMS4
-* Submit arbitrary "bash" jobs to condor (facilitates "babymaking")
-* Chain a set of CMSSW tasks to go from LHE to MINIAOD
+ProjectMetis is a workflow manager that can submit somewhat arbitrary batch jobs to HTCondor.
+An input can be a list of files or a DBS-published dataset. Tasks can be chained and failures
+are resubmitted automatically. There's also a pretty monitoring dashboard.
 
-In the process of fulfilling the above, ProjectMetis exposes some nice standalone API for:
-* `condor_q`, `condor_submit`, etc.
-* [DIS](https://github.com/aminnj/dis) integration (i.e., queries to internal SNT database, MCM, PhEDEx, DBS)
+<img src="dashboard/images/dashboard.png">
 
 ## Installation and Setup
-0. Checkout this repository
-1. Set up environment via `source setup.sh`. Note that this doesn't overwrite an existing CMSSW environment if you already have one
+Clone this repository, and set up the environment via `source setup.sh`. Note that this doesn't overwrite an existing CMSSW environment if you already have one.
+
+A minimal setup to submit jobs to run on CMS NANOAOD is in [`examples/nanoaod/`](examples/nanoaod/).
 
 ## Example
-CRAB-like operation requires a dataset name, a CMSSW pset, and a tarball of the environment (if necessary).
-Here's a quick preview, but there are more use case examples in `examples/`.
+CRAB-like operation (`CMSSWTask`) requires a dataset name, a CMSSW pset, and a tarball of the environment (if necessary).
+Here's a quick preview, but there are examples with different use cases examples in the [examples directory](examples/).
+
 ```python
 from metis.CMSSWTask import CMSSWTask
 from metis.Sample import DBSSample
@@ -60,17 +57,13 @@ if __name__ == "__main__":
 ```
 
 
-## Unit tests
-Unit tests will be written in `test/` following the convention of appending `_t.py` to the class which it tests.
-Workflow tests will also be written in `test/` following the convention of prepending `test_` to the name, e.g., `test_DummyMoveWorkflow.py`.
 
-The full unit test suite is run using the executable `mtest` in `scripts/` (if Metis is set up properly, you need only execute the command `mtest`). For more fine-grained control, try
-* for all class unit tests, execute the following from this project directory: `python -m unittest discover -p "*_t.py"`
-* for all workflow tests, execute `python -m unittest discover -p "test_*.py"`
-* for all tests, execute: `python -m unittest discover -s test -p "*.py"`
+## Unit tests
+The full unit test suite is run using the executable `mtest` in `scripts/` (if Metis is set up properly, you need only execute the command `mtest`).
 
 ## Development
 General workflow is 
 * Make changes
 * Test with `mtest` (or if it's a minor change, ignore this and let the continuous integration take care of testing)
 * Submit a PR
+

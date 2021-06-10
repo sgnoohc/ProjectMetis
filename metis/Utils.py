@@ -22,6 +22,7 @@ import fcntl
 from collections import Counter
 from contextlib import contextmanager
 
+# from `condor_status -any -const 'MyType=="glideresource"' -af GLIDEIN_CMSSite | sort | uniq`
 # http://uaf-10.t2.ucsd.edu/~namin/dump/badsites.html
 good_sites = set([
 
@@ -116,9 +117,9 @@ def locked_open(filename, mode='r'):
        use within the context.
     """
     with open(filename, mode) as fd:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        # fcntl.flock(fd, fcntl.LOCK_EX)
         yield fd
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        # fcntl.flock(fd, fcntl.LOCK_UN)
 
 def do_cmd(cmd, returnStatus=False, dryRun=False):
     if dryRun:

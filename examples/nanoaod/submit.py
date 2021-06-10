@@ -11,15 +11,16 @@ if not os.path.exists("inputs.tar.gz"):
 for i in range(100):
     total_summary = {}
     for dataset in [
-            "/DYJetsToLL_M-4to50_HT-100to200_TuneCP5_PSweights_13TeV-madgraphMLM-pythia8/RunIIAutumn18NanoAODv7-Nano02Apr2020_102X_upgrade2018_realistic_v21-v1/NANOAODSIM",
+            "/TTJets_SingleLeptFromT_TuneCP5_13TeV-madgraphMLM-pythia8/RunIIAutumn18NanoAODv7-Nano02Apr2020_102X_upgrade2018_realistic_v21-v1/NANOAODSIM",
+            "/DoubleMuon/Run2018D-UL2018_MiniAODv1_NanoAODv2-v1/NANOAOD",
             ]:
         task = CondorTask(
                 sample = DBSSample(dataset=dataset),
-                events_per_output = 1e6,
+                events_per_output = 3e6,
                 output_name = "output.root",
-                tag = "nanotestv1",
-                cmssw_version = "CMSSW_10_2_5",
-                scram_arch = "slc6_amd64_gcc700",
+                tag = "nanotestv4",
+                cmssw_version = "CMSSW_10_6_19_patch3",
+                scram_arch = "slc7_amd64_gcc700",
                 tarfile = "inputs.tar.gz",
                 executable = "condor_nano_exe.sh",
                 )

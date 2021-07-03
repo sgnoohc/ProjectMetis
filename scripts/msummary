@@ -159,6 +159,14 @@ def main(args):
                                 print "\t\t{}".format(line.replace("\n",""))
                             print "\t\t __________ LAST {} LINES <<<<<< __________".format(nlines)
 
+                if verbosity > 2:
+                    if os.path.exists(info["last_log"]):
+                        with open(info["last_log"]) as fhlog:
+                            print "\t\t __________ FIRST {} LINES >>>>>> __________".format(nlines)
+                            for line in fhlog.readlines()[:nlines]:
+                                print "\t\t{}".format(line.replace("\n",""))
+                            print "\t\t __________ FIRST {} LINES <<<<<< __________".format(nlines)
+
     if show_total:
         done,total,fraction = map(sum,zip(*[get_progress(t["general"]) for t in tasks]))
         fraction = 1.0*done/total

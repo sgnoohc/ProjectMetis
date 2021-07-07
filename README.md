@@ -12,6 +12,8 @@ are resubmitted automatically. There's also a pretty monitoring dashboard.
 ## Installation and Setup
 Clone this repository, and set up the environment via `source setup.sh`. Note that this doesn't overwrite an existing CMSSW environment if you already have one.
 
+To check that things are working (including condor submission, job stageout, proxy permissions), run the unit tests with `mtest`.
+
 A minimal setup to submit jobs to run on CMS NANOAOD is in [`examples/nanoaod/`](examples/nanoaod/).
 
 ## Example

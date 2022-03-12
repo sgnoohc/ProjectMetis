@@ -219,7 +219,7 @@ ls -l
         outfile = "{0}/{1}".format(basedir,outname)
         outfilestore = outfile.replace("/hadoop/cms", "")
         for outfinal, url in [
-            (outfilestore, "davs://redirector.t2.ucsd.edu:1094"),
+            (outfilestore, "davs://redirector.t2.ucsd.edu:1095"),
             (outfile, "gsiftp://gftp.t2.ucsd.edu"),
             ]:
             cmd = """ seq 1 3 > {outname}; rm -f {outfile}; env -i X509_USER_PROXY=/tmp/x509up_u`id -u` gfal-copy -p -f -t 4200 --verbose file://`pwd`/{outname} {url}{outfinal} --checksum ADLER32 """.format(url=url, outname=outname, outfile=outfile, outfinal=outfinal)

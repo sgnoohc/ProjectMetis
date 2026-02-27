@@ -1,7 +1,7 @@
 import os
 import traceback
 import logging
-import cPickle as pickle
+import pickle
 
 from metis.Utils import setup_logger, do_cmd, metis_base
 
@@ -80,7 +80,7 @@ class Task(object):
         Back up registered (in self.info_to_backup()) variables
         """
         fname = "{0}/backup.pkl".format(self.get_taskdir())
-        with open(fname, "w") as fhout:
+        with open(fname, "wb") as fhout:
             d = {}
             nvars = 0
             for tob in self.info_to_backup():
@@ -93,7 +93,7 @@ class Task(object):
     def load(self):
         fname = "{0}/backup.pkl".format(self.get_taskdir())
         if os.path.exists(fname):
-            with open(fname, "r") as fhin:
+            with open(fname, "rb") as fhin:
                 data = pickle.load(fhin)
                 nvars = len(data.keys())
                 for key in data:

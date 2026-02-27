@@ -106,12 +106,12 @@ def get_parsed_info(globber="tasks/CMSSWTask*v1*/*.pkl"):
         return pf.split("SiteTest_",1)[1].split("_TEST",1)[0]
 
     def parse(pf):
-        with open(pf,"r") as fh:
+        with open(pf,"rb") as fh:
             data = pickle.load(fh)
         dirpath = pf.rsplit("/",1)[0]
         _, ver, datestr = dirpath.rsplit("_",2)
         sitename = get_sitename(pf)
-        jobs = data["job_submission_history"].values()[0]
+        jobs = list(data["job_submission_history"].values())[0]
         output = data["io_mapping"][0][1]
         ret = dict(
                 sitename=sitename,
@@ -129,19 +129,19 @@ def get_parsed_info(globber="tasks/CMSSWTask*v1*/*.pkl"):
 
     already_parsed = []
     try:
-        with open("parsed.pkl","r") as fhin:
+        with open("parsed.pkl","rb") as fhin:
             already_parsed = pickle.load(fhin)
     except: pass
     print("Already parsed {} tasks".format(len(already_parsed)))
-    already_parsed_pairs = map(lambda x:(x["sitename"], x["dt"]), already_parsed)
+    already_parsed_pairs = list(map(lambda x:(x["sitename"], x["dt"]), already_parsed))
     pfs = glob.glob(globber)
     now = datetime.datetime.now()
     toparse = [pf for pf in pfs if 
             ((get_sitename(pf),get_dtobj(pf)) not in already_parsed_pairs) or ((get_dtobj(pf)-now).days<=1)
             ]
     print("Parsing {} new tasks".format(len(toparse)))
-    with open("parsed.pkl","w") as fhout:
-        already_parsed += map(parse,toparse)
+    with open("parsed.pkl","wb") as fhout:
+        already_parsed += list(map(parse,toparse))
         pickle.dump(already_parsed, fhout)
     return already_parsed
 

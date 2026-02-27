@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 """
     ShameFULLy stolen from
         https://github.com/dmwm/CRABClient/blob/master/src/python/CRABClient/JobType/UserTarball.py
@@ -9,7 +7,7 @@ import os
 import glob
 import tarfile
 import tempfile
-import commands
+import subprocess
 from fnmatch import fnmatch
 
 class UserTarball(object):
@@ -128,7 +126,7 @@ class UserTarball(object):
             # -h to follow symlinks
             cmd = "{level_str} tar cJf {name} -C $CMSSW_BASE -h --no-recursion --files-from={filelist}".format(level_str=level_str,name=self.name,filelist=f.name)
             print("Running:",cmd)
-            stat, out = commands.getstatusoutput(cmd)
+            stat, out = subprocess.getstatusoutput(cmd)
             f.close()
 
 

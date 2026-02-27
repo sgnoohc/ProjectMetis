@@ -45,13 +45,13 @@ def query(q, typ="basic", detail=False, timeout=999):
     try:
         content =  urlopen(url,timeout=timeout).read()
         data = json.loads(content)
-    except: 
-        print("Failed to perform URL fetching and decoding (using uaf-%s)!" % num)
+    except Exception as e:
+        print("Failed to perform URL fetching and decoding: %s" % str(e))
 
     return data
 
 def listofdicts_to_table(lod): # pragma: no cover
-    colnames = list(set(sum([thing.keys() for thing in lod],[])))
+    colnames = list(set(sum([list(thing.keys()) for thing in lod],[])))
 
     # key is col name and value is maximum length of any entry in that column
     d_colsize = {}

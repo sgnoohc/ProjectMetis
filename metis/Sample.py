@@ -1,5 +1,3 @@
-from __future__ import print_function
-
 import logging
 import glob
 import time
@@ -422,7 +420,7 @@ class FilelistSample(DirectorySample):
         else:
             imf = ImmutableFile(self.filelist)
             if not imf.exists(): raise Exception("Filelist {} does not exist!".format(imf.get_name()))
-            filepaths = map(lambda x: x.strip(), imf.cat().splitlines())
+            filepaths = list(map(lambda x: x.strip(), imf.cat().splitlines()))
         filepaths, nevents = self.separate_paths_events(filepaths)
 
         if self.use_xrootd:
@@ -439,7 +437,7 @@ class FilelistSample(DirectorySample):
         if len(thelist) > 0:
             if len(thelist[0]) == 2:
                 filepaths, nevents = zip(*thelist)
-                nevents = map(int, nevents)
+                nevents = list(map(int, nevents))
                 return filepaths, nevents
         return thelist, []
 
@@ -470,7 +468,7 @@ class DummySample(DirectorySample):
             return self.info["files"]
         extra = {}
         nevents_per_file = 0
-        if self.info.get("nevents",0) > 0:
+        if (self.info.get("nevents", 0) or 0) > 0:
             nevents_per_file = int(self.info["nevents"] / self.n_dummy_files)
             self.info["nevts"] = self.info["nevents"]
         self.info["files"] = [EventsFile("{}_{}.{}".format(self.dummy_name,i,self.dummy_extension),fake=True,nevents=nevents_per_file) for i in range(self.n_dummy_files)]

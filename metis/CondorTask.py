@@ -352,7 +352,7 @@ class CondorTask(Task):
             v_ins = [d["ins"] for d in to_submit]
             v_out = [d["out"] for d in to_submit]
             succeeded, cluster_id = self.submit_multiple_condor_jobs(v_ins, v_out, fake=fake, optimizer=optimizer)
-            procids = map(str,range(len(v_out)))
+            procids = list(map(str,range(len(v_out))))
             if succeeded:
                 for out,procid in zip(v_out,procids):
                     index = out.get_index()  # "merged_ntuple_42.root" --> 42
@@ -596,7 +596,7 @@ class CondorTask(Task):
             d_jobs[index] = {}
             d_jobs[index]["output"] = [out.get_name(), out.get_nevents()]
             d_jobs[index]["output_exists"] = out.exists()
-            d_jobs[index]["inputs"] = map(lambda x: [x.get_name(), x.get_nevents()], ins)
+            d_jobs[index]["inputs"] = list(map(lambda x: [x.get_name(), x.get_nevents()], ins))
             submission_history = d_history.get(index, [])
             is_on_condor = False
             last_clusterid = -1

@@ -46,7 +46,7 @@ class File(object):
         return hash(self.name)
 
     def __eq__(self, other):
-        if type(other) in [unicode, str]:
+        if isinstance(other, str):
             return self.name == other
         else:
             return self.name == other.get_name()

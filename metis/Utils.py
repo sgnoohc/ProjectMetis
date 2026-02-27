@@ -1,14 +1,8 @@
-from __future__ import print_function
-
 import math
 import time                                                
 import os
 import json
-try:
-    import commands
-except:
-    # python3 compatibility
-    import subprocess as commands
+import subprocess
 try:
     import htcondor
     _ = htcondor.Schedd()
@@ -126,7 +120,7 @@ def do_cmd(cmd, returnStatus=False, dryRun=False):
         print("dry run: {}".format(cmd))
         status, out = 1, ""
     else:
-        status, out = commands.getstatusoutput(cmd)
+        status, out = subprocess.getstatusoutput(cmd)
     if returnStatus: return status, out
     else: return out
 
@@ -165,7 +159,7 @@ def interruptible_sleep(n,reload_modules=[]):
         print("Sleeping for {}s.".format(n))
         time.sleep(n)
     except KeyboardInterrupt:
-        raw_input("Press Enter to force update, or Ctrl-C to quit.")
+        input("Press Enter to force update, or Ctrl-C to quit.")
         print("Force updating...")
         if reload_modules:
             print("Reloading {} modules: {}".format(
@@ -353,7 +347,7 @@ def condor_submit(**kwargs): # pragma: no cover
     if queue_multiple:
         if len(kwargs["arguments"]) and (type(kwargs["arguments"][0]) not in [tuple,list]):
             raise RuntimeError("If queueing multiple jobs in one cluster_id, arguments must be a list of lists")
-        params["arguments"] = map(lambda x: " ".join(map(str,x)), kwargs["arguments"])
+        params["arguments"] = list(map(lambda x: " ".join(map(str,x)), kwargs["arguments"]))
         params["extra"] = []
         if "selection_pairs" in kwargs:
             sps = kwargs["selection_pairs"]
@@ -454,6 +448,224 @@ when_to_transfer_output = ON_EXIT
 
     return succeeded, cluster_id
 
+def slurm_submit(**kwargs):
+    """
+    Takes in various keyword arguments to submit a SLURM job.
+    Returns (succeeded:bool, job_id:str)
+    fake=True kwarg returns (True, -1)
+    return_template=True returns the batch script as a string
+    """
+
+    if kwargs.get("fake", False):
+        return True, -1
+
+    for needed in ["executable", "arguments", "logdir"]:
+        if needed not in kwargs:
+            raise RuntimeError("To submit a proper SLURM job, please specify: {0}".format(needed))
+
+    params = {}
+    params["job_name"] = kwargs.get("job_name", "metis_job")
+    params["executable"] = kwargs["executable"]
+    params["logdir"] = kwargs["logdir"]
+    params["partition"] = kwargs.get("partition", "hpg-default")
+    params["qos"] = kwargs.get("qos", "normal")
+    params["account"] = kwargs.get("account", os.environ.get("SLURM_ACCOUNT", ""))
+    params["time"] = kwargs.get("time", "08:00:00")
+    params["memory"] = kwargs.get("memory", "2gb")
+    params["cpus_per_task"] = kwargs.get("cpus_per_task", 1)
+    params["gpus"] = kwargs.get("gpus", None)
+    params["modules"] = kwargs.get("modules", [])
+    params["extra_directives"] = kwargs.get("extra_directives", {})
+    params["stageout_cmd"] = kwargs.get("stageout_cmd", None)
+
+    exe_dir = params["executable"].rsplit("/", 1)[0]
+    if "/" not in os.path.normpath(params["executable"]):
+        exe_dir = "."
+
+    arguments = kwargs["arguments"]
+    if type(arguments) in [tuple, list]:
+        arguments = " ".join(map(str, arguments))
+
+    inputfiles = kwargs.get("inputfiles", [])
+    inputfiles_str = ""
+    if inputfiles:
+        inputfiles_str = "\n# Copy input files to working directory\n"
+        for f in inputfiles:
+            inputfiles_str += "cp {0} .\n".format(f)
+
+    gpu_line = ""
+    if params["gpus"]:
+        gpu_line = "#SBATCH --gpus={0}".format(params["gpus"])
+
+    account_line = ""
+    if params["account"]:
+        account_line = "#SBATCH --account={0}".format(params["account"])
+
+    extra_directives_str = ""
+    for key, val in params["extra_directives"].items():
+        extra_directives_str += "#SBATCH --{0}={1}\n".format(key, val)
+
+    modules_str = ""
+    if params["modules"]:
+        modules_str = "\n# Load modules\nmodule purge\n"
+        for mod in params["modules"]:
+            modules_str += "module load {0}\n".format(mod)
+
+    template = """#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --output={logdir}/std_logs/slurm_%j.out
+#SBATCH --error={logdir}/std_logs/slurm_%j.err
+#SBATCH --partition={partition}
+#SBATCH --qos={qos}
+{account_line}
+#SBATCH --time={time}
+#SBATCH --mem={memory}
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --ntasks=1
+{gpu_line}
+{extra_directives}
+
+echo "[slurm_wrapper] SLURM_JOB_ID = $SLURM_JOB_ID"
+echo "[slurm_wrapper] SLURM_JOB_NAME = $SLURM_JOB_NAME"
+echo "[slurm_wrapper] hostname = $(hostname)"
+echo "[slurm_wrapper] date = $(date)"
+echo "[slurm_wrapper] time = $(date +%s)"
+
+STARTDIR=$(pwd)
+WORKDIR=${{SLURM_TMPDIR:-/tmp/slurm_$SLURM_JOB_ID}}
+mkdir -p $WORKDIR
+cd $WORKDIR
+{modules}
+{input_files}
+chmod +x {executable_basename}
+./{executable_basename} {arguments}
+RETVAL=$?
+
+cd $STARTDIR
+
+exit $RETVAL
+""".format(
+        job_name=params["job_name"],
+        logdir=params["logdir"],
+        partition=params["partition"],
+        qos=params["qos"],
+        account_line=account_line,
+        time=params["time"],
+        memory=params["memory"],
+        cpus_per_task=params["cpus_per_task"],
+        gpu_line=gpu_line,
+        extra_directives=extra_directives_str,
+        modules=modules_str,
+        input_files=inputfiles_str,
+        executable_basename=os.path.basename(params["executable"]),
+        arguments=arguments,
+    )
+
+    if kwargs.get("return_template", False):
+        return template
+
+    submit_file = "{0}/submit_{1}.sh".format(exe_dir, params["job_name"].rsplit("__", 1)[-1] if "__" in params["job_name"] else "0")
+    do_cmd("mkdir -p {0}/std_logs/".format(params["logdir"]))
+    with open(submit_file, "w") as fhout:
+        fhout.write(template)
+
+    out = do_cmd("sbatch {0}".format(submit_file))
+
+    succeeded = False
+    job_id = -1
+    if "Submitted batch job" in out:
+        succeeded = True
+        job_id = out.strip().split()[-1]
+    else:
+        raise RuntimeError("Couldn't submit SLURM job because:\n----\n{0}\n----".format(out))
+
+    return succeeded, job_id
+
+def slurm_q(job_name_pattern=None, job_ids=None):
+    """
+    Query SLURM queue and return list of dicts with job info.
+    Each dict has: JobId, JobName, State, TimeUsed, Reason, jobnum (parsed from job name).
+    State is mapped to Condor-compatible single-letter codes: R (running), I (idle/pending), H (held/failed).
+    """
+    # SLURM state to Metis-compatible mapping
+    state_map = {
+        "RUNNING": "R",
+        "R": "R",
+        "PENDING": "I",
+        "PD": "I",
+        "COMPLETING": "R",
+        "CG": "R",
+        "SUSPENDED": "H",
+        "S": "H",
+        "FAILED": "H",
+        "F": "H",
+        "TIMEOUT": "H",
+        "TO": "H",
+        "CANCELLED": "H",
+        "CA": "H",
+        "NODE_FAIL": "H",
+        "NF": "H",
+        "PREEMPTED": "H",
+        "PR": "H",
+        "OUT_OF_MEMORY": "H",
+        "OOM": "H",
+    }
+
+    cmd = 'squeue -u $USER --format="%i %j %T %M %r" -h'
+    if job_ids:
+        cmd = 'squeue --jobs={0} --format="%i %j %T %M %r" -h'.format(",".join(map(str, job_ids)))
+
+    output = do_cmd(cmd)
+    jobs = []
+    for line in output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split(None, 4)
+        if len(parts) < 4:
+            continue
+        job_id = parts[0]
+        job_name = parts[1]
+        state = parts[2]
+        time_used = parts[3]
+        reason = parts[4] if len(parts) > 4 else ""
+
+        mapped_state = state_map.get(state, "H")
+
+        # Parse jobnum from job name convention: {taskname}__{jobnum}
+        jobnum = -1
+        if "__" in job_name:
+            try:
+                jobnum = int(job_name.rsplit("__", 1)[1])
+            except (ValueError, IndexError):
+                pass
+
+        d = {
+            "JobId": job_id,
+            "JobName": job_name,
+            "State": mapped_state,
+            "RawState": state,
+            "TimeUsed": time_used,
+            "Reason": reason,
+            "jobnum": jobnum,
+            "EnteredCurrentStatus": time.time(),  # SLURM squeue doesn't expose this directly; approximate with now
+        }
+        jobs.append(d)
+
+    # Filter by job name pattern if specified
+    if job_name_pattern:
+        prefix = job_name_pattern.rstrip("*")
+        jobs = [j for j in jobs if j["JobName"].startswith(prefix)]
+
+    return jobs
+
+def slurm_rm(job_ids=[]):
+    """
+    Cancel SLURM jobs by job IDs.
+    """
+    if job_ids:
+        do_cmd("scancel {0}".format(" ".join(map(str, job_ids))))
+
 def file_chunker(files, files_per_output=-1, events_per_output=-1, MB_per_output=-1, flush=False):
     """
     Chunks a list of File objects into list of lists by
@@ -550,7 +762,7 @@ def get_hist(vals, do_unicode=True, width=50): # pragma: no cover
     fillchar = "*"
     verticalbar = "|"
     if do_unicode:
-        fillchar = unichr(0x2588).encode('utf-8')
+        fillchar = chr(0x2588)
         verticalbar = "\x1b(0x\x1b(B"
     buff = ""
     for w in sorted(d, key=d.get, reverse=True):
@@ -580,11 +792,11 @@ def print_logo(animation=True): # pragma: no cover
       """
 
     d_symbols = {}
-    d_symbols["v"] = unichr(0x21E3).encode('utf-8')
-    d_symbols[">"] = unichr(0x21E2).encode('utf-8')
-    d_symbols["<"] = unichr(0x21E0).encode('utf-8')
-    d_symbols["o"] = unichr(0x25C9).encode('utf-8')
-    d_symbols["#"] = unichr(0x25A3).encode('utf-8')
+    d_symbols["v"] = chr(0x21E3)
+    d_symbols[">"] = chr(0x21E2)
+    d_symbols["<"] = chr(0x21E0)
+    d_symbols["o"] = chr(0x25C9)
+    d_symbols["#"] = chr(0x25A3)
 
     d_mapping = {}
     d_mapping["a"] = d_symbols["o"]

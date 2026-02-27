@@ -102,7 +102,7 @@ if __name__ == "__main__":
 
     usites = np.unique(data["site"])
     for site in usites:
-        print "{} -> {} entries".format(site, (data["site"] == site).sum())
+        print("{} -> {} entries".format(site, (data["site"] == site).sum()))
 
     ts_first = data["ts"].min() - 1
     ts_last = data["ts"].max() + 1

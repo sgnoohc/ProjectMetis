@@ -17,11 +17,11 @@ def merge_histories(hold, hnew):
 
 class StatsParser(object):
 
-    def __init__(self, data = {}, summary_fname="summary.json", webdir="~/public_html/dump/metis_test/", do_history=True, make_plots=False):
+    def __init__(self, data = {}, summary_fname="summary.json", wsummary_name="web_summary.json", webdir="~/public_html/dump/metis_test/", do_history=True, make_plots=False):
         self.data = data
         self.summary_fname = summary_fname
         self.webdir = webdir
-        self.SUMMARY_NAME = "web_summary.json"
+        self.SUMMARY_NAME = wsummary_name
         self.do_history = do_history
         self.logger = logging.getLogger(Utils.setup_logger())
         self.make_plots = make_plots

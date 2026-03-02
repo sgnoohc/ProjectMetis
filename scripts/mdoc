@@ -76,7 +76,7 @@ footer = """
 
 def parse_init(s):
     params = s.split("__init__(")[-1].split(")")[0].split(",")
-    params = map(lambda x: x.strip(), params)
+    params = [x.strip() for x in params]
     named = list(set(params) - set(["self","**kwargs"]))
     return named
 
@@ -201,7 +201,7 @@ def make_documentation(args):
     webfile = os.path.expanduser("~/public_html/doc.html")
     relpath = webfile.split("public_html/")[1]
     url = "http://{0}/~{1}/{2}".format(os.uname()[1],os.getenv("USER"),relpath)
-    print "Copied documentation to {0}".format(url)
+    print("Copied documentation to {0}".format(url))
 
     with open(webfile,"w") as fhout:
         fhout.write(doc)

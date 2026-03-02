@@ -70,13 +70,13 @@ def main(args):
 
 
     if not do_rm:
-        print "\033[93mFound {0} matching tasks\033[0m".format(len(matching_dsnames))
+        print("\033[93mFound {0} matching tasks\033[0m".format(len(matching_dsnames)))
         for dsname in sorted(matching_dsnames):
-            print "\t{0}".format(dsname)
+            print("\t{0}".format(dsname))
         if len(matching_dsnames):
-            print "\033[93mTo prune them from monitoring only, re-run same command with \033[38;2;250;50;50m--rm\033[0m".format(len(matching_dsnames))
+            print("\033[93mTo prune them from monitoring only, re-run same command with \033[38;2;250;50;50m--rm\033[0m".format(len(matching_dsnames)))
             if drop_before_days > 0:
-                print "\033[93mAdditionally, timestamps will be dropped if before {0} days ago\033[0m".format(drop_before_days)
+                print("\033[93mAdditionally, timestamps will be dropped if before {0} days ago\033[0m".format(drop_before_days))
     else:
 
         minimum_timestamp = int((datetime.datetime.now() - datetime.timedelta(days=drop_before_days)).strftime("%s"))
@@ -113,7 +113,7 @@ def main(args):
         with open(totalpath,"w") as fhout:
             json.dump(data_raw, fhout)
 
-        print "\033[38;2;250;50;50mRemoved {0} matching tasks\033[0m".format(ndropped)
+        print("\033[38;2;250;50;50mRemoved {0} matching tasks\033[0m".format(ndropped))
 
 if __name__ == "__main__":
 

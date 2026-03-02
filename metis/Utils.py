@@ -487,6 +487,17 @@ def slurm_submit(**kwargs):
         arguments = " ".join(map(str, arguments))
 
     inputfiles = kwargs.get("inputfiles", [])
+
+    # Stage X509 proxy to shared filesystem for SLURM worker access
+    proxy_file = get_proxy_file()
+    if os.path.exists(proxy_file):
+        proxy_staged = os.path.join(params["logdir"], "x509up_proxy")
+        if not os.path.exists(proxy_staged) or \
+           os.path.getmtime(proxy_file) > os.path.getmtime(proxy_staged):
+            import shutil
+            shutil.copy2(proxy_file, proxy_staged)
+        inputfiles.append(os.path.abspath(proxy_staged))
+
     inputfiles_str = ""
     if inputfiles:
         inputfiles_str = "\n# Copy input files to working directory\n"
@@ -537,11 +548,20 @@ mkdir -p $WORKDIR
 cd $WORKDIR
 {modules}
 {input_files}
+# Set up X509 proxy if available
+if [ -f x509up_proxy ]; then
+    export X509_USER_PROXY=$(pwd)/x509up_proxy
+    echo "[slurm_wrapper] X509_USER_PROXY = $X509_USER_PROXY"
+fi
+
 chmod +x {executable_basename}
 ./{executable_basename} {arguments}
 RETVAL=$?
 
 cd $STARTDIR
+
+# Clean up X509 proxy from worker
+rm -f $WORKDIR/x509up_proxy
 
 exit $RETVAL
 """.format(

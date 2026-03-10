@@ -247,7 +247,7 @@ class CondorTask(Task):
         return_fraction specified as True
         """
         self.recache_outputs()
-        bools = list(map(lambda output: output.get_status() == Constants.DONE, self.get_outputs()))
+        bools = list(map(lambda output: output.get_status() == Constants.DONE or output.exists(), self.get_outputs()))
         if len(bools) == 0:
             frac = 0.
         else:

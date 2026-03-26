@@ -1,0 +1,605 @@
+#!/usr/bin/env python3
+
+"""
+mreport - Metis Campaign Report
+
+Shows a post-campaign summary: per-sample job counts, file counts, event
+counts, wall-clock time (via sacct), and effective event processing rates.
+
+Examples:
+    mreport Run2_Bkg_v15_03Mar2026_v3          # report for a specific campaign
+    mreport Run2_Bkg_v15_03Mar2026_v3 -t       # include per-job timing from sacct
+    mreport -l                                  # list available campaigns
+    mreport Run2_Bkg_v15_03Mar2026_v3 -p TT    # filter samples matching "TT"
+    mreport Run2_Bkg_v15_03Mar2026_v3 --csv     # output as CSV
+"""
+
+import subprocess
+import argparse
+import json
+import os
+import sys
+from collections import defaultdict
+from fnmatch import fnmatch
+from pathlib import Path
+
+
+BOLD = '\033[1m'
+DIM = '\033[2m'
+GREEN = '\033[92m'
+RED = '\033[91m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+CYAN = '\033[96m'
+MAGENTA = '\033[95m'
+ENDC = '\033[0m'
+
+PUBLIC_HTML = os.path.expanduser("~/public_html")
+
+
+def colorize(text, color, do_color):
+    if do_color and color:
+        return "{}{}{}".format(color, text, ENDC)
+    return text
+
+
+def rjust_color(value, width, color, do_color):
+    """Right-justify a value then colorize (so ANSI codes don't break alignment)."""
+    text = str(value)
+    padded = text.rjust(width)
+    return colorize(padded, color, do_color)
+
+
+def format_nevents(n):
+    """Format event counts with K/M/B suffixes."""
+    if n >= 1e9:
+        return "{:.1f}B".format(n / 1e9)
+    elif n >= 1e6:
+        return "{:.1f}M".format(n / 1e6)
+    elif n >= 1e3:
+        return "{:.1f}K".format(n / 1e3)
+    return str(n)
+
+
+def format_duration(seconds):
+    """Format seconds into compact human-readable string."""
+    if seconds <= 0:
+        return "-"
+    if seconds < 60:
+        return "{:.0f}s".format(seconds)
+    elif seconds < 3600:
+        m = int(seconds) // 60
+        s = int(seconds) % 60
+        return "{}m{:02d}s".format(m, s)
+    elif seconds < 86400:
+        h = int(seconds) // 3600
+        m = (int(seconds) % 3600) // 60
+        return "{}h{:02d}m".format(h, m)
+    else:
+        d = int(seconds) // 86400
+        h = (int(seconds) % 86400) // 3600
+        return "{}d{:02d}h".format(d, h)
+
+
+def parse_elapsed(elapsed_str):
+    """Parse sacct Elapsed format (HH:MM:SS or D-HH:MM:SS) to seconds."""
+    days = 0
+    if '-' in elapsed_str:
+        day_part, elapsed_str = elapsed_str.split('-', 1)
+        days = int(day_part)
+    parts = elapsed_str.split(':')
+    if len(parts) == 3:
+        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    elif len(parts) == 2:
+        h, m, s = 0, int(parts[0]), int(parts[1])
+    else:
+        return 0
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+def has_summary(path):
+    """Check if a campaign directory has summary.json at top level or in any subdirectory."""
+    if os.path.exists(os.path.join(path, "summary.json")):
+        return True
+    for entry in os.listdir(path):
+        subdir = os.path.join(path, entry)
+        if os.path.isdir(subdir) and os.path.exists(os.path.join(subdir, "summary.json")):
+            return True
+    return False
+
+
+def list_campaigns():
+    """List available campaigns in ~/public_html/."""
+    if not os.path.isdir(PUBLIC_HTML):
+        print("No campaigns found (~/public_html/ does not exist).")
+        return
+
+    campaigns = []
+    for entry in sorted(os.listdir(PUBLIC_HTML)):
+        path = os.path.join(PUBLIC_HTML, entry)
+        if os.path.isdir(path) and has_summary(path):
+            campaigns.append(entry)
+
+    if not campaigns:
+        print("No campaigns found in ~/public_html/.")
+        return
+
+    print("Available campaigns:")
+    for c in campaigns:
+        try:
+            campaign_path = os.path.join(PUBLIC_HTML, c)
+            web_summary_path = os.path.join(campaign_path, "web_summary.json")
+            all_tasks = []
+            if os.path.exists(web_summary_path):
+                with open(web_summary_path) as f:
+                    d = json.load(f)
+                all_tasks = d.get("tasks", [])
+            else:
+                for entry in sorted(os.listdir(campaign_path)):
+                    sub_web = os.path.join(campaign_path, entry, "web_summary.json")
+                    if os.path.isdir(os.path.join(campaign_path, entry)) and os.path.exists(sub_web):
+                        with open(sub_web) as f:
+                            sd = json.load(f)
+                        all_tasks.extend(sd.get("tasks", []))
+            ntasks = len(all_tasks)
+            njobs = sum(t["general"]["njobs_total"] for t in all_tasks)
+            njobs_done = sum(t["general"]["njobs_done"] for t in all_tasks)
+            nevts = sum(t["general"]["nevents_total"] for t in all_tasks)
+            done = njobs_done == njobs
+            status = "DONE" if done else "{}/{} jobs".format(njobs_done, njobs)
+            print("  {:<45s}  {:>4d} samples  {:>6d} jobs  {:>8s} evts  {}".format(
+                c, ntasks, njobs, format_nevents(nevts), status))
+        except Exception:
+            print("  {}".format(c))
+
+
+def shorten_dataset(dsname):
+    """Extract a short sample name from full DBS dataset path."""
+    parts = dsname.strip('/').split('/')
+    if len(parts) < 2:
+        return dsname
+
+    process = parts[0]
+    campaign = parts[1]
+
+    # Extract era info from campaign string
+    era = ""
+    if "UL16NanoAODAPV" in campaign or "UL2016_MiniAODAPV" in campaign:
+        era = "UL16APV"
+    elif "UL16NanoAOD" in campaign or "UL2016_MiniAOD" in campaign:
+        era = "UL16"
+    elif "UL17NanoAOD" in campaign or "UL2017" in campaign:
+        era = "UL17"
+    elif "UL18NanoAOD" in campaign or "UL2018" in campaign:
+        era = "UL18"
+    elif "Run2016" in campaign:
+        era = "16"
+    elif "Run2017" in campaign:
+        era = "17"
+    elif "Run2018" in campaign:
+        era = "18"
+    elif "Run2022" in campaign:
+        era = "22"
+    elif "Run2023" in campaign:
+        era = "23"
+    elif "Run2024" in campaign:
+        era = "24"
+
+    # Shorten process name: drop TuneCP5 and everything after it for MC
+    short = process.split("_TuneCP5")[0] if "_TuneCP5" in process else process
+    # For data: keep run letter
+    for run_suffix in ["Run2016B", "Run2016C", "Run2016D", "Run2016E", "Run2016F",
+                        "Run2016G", "Run2016H",
+                        "Run2017B", "Run2017C", "Run2017D", "Run2017E", "Run2017F",
+                        "Run2018A", "Run2018B", "Run2018C", "Run2018D",
+                        "Run2022C", "Run2022D", "Run2022E", "Run2022F", "Run2022G",
+                        "Run2023B", "Run2023C", "Run2023D"]:
+        if run_suffix in process:
+            # For data, the process name IS the short name, era is embedded
+            return process
+
+    if era:
+        return "{}_{}".format(short, era)
+    return short
+
+
+def get_sacct_timing(job_ids):
+    """Query sacct for elapsed times of given job IDs. Returns dict {job_id: seconds}."""
+    if not job_ids:
+        return {}
+
+    # sacct has a limit on how many IDs we can pass at once, batch them
+    timings = {}
+    batch_size = 200
+    for i in range(0, len(job_ids), batch_size):
+        batch = job_ids[i:i + batch_size]
+        ids_str = ",".join(batch)
+        try:
+            result = subprocess.run(
+                ["sacct", "--format=JobID,Elapsed,Start,End,AllocCPUS", "--noheader",
+                 "--parsable2", "-j", ids_str],
+                capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                continue
+        except Exception:
+            continue
+
+        for line in result.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            parts = line.split('|')
+            if len(parts) < 5:
+                continue
+            job_id = parts[0].strip()
+            # Skip sub-steps like 12345.batch, 12345.extern
+            if '.' in job_id:
+                continue
+            elapsed = parts[1].strip()
+            start = parts[2].strip()
+            end = parts[3].strip()
+            try:
+                ncpus = int(parts[4].strip())
+            except (ValueError, IndexError):
+                ncpus = 1
+            secs = parse_elapsed(elapsed)
+            timings[job_id] = {
+                'elapsed': secs,
+                'ncpus': ncpus,
+                'cpu_seconds': secs * ncpus,
+                'start': start,
+                'end': end,
+            }
+
+    return timings
+
+
+def load_campaign(campaign_name):
+    """Load campaign data from summary.json and web_summary.json."""
+    campaign_dir = os.path.join(PUBLIC_HTML, campaign_name)
+
+    if not os.path.isdir(campaign_dir):
+        return None, None
+
+    summary_path = os.path.join(campaign_dir, "summary.json")
+    web_summary_path = os.path.join(campaign_dir, "web_summary.json")
+
+    summary = {}
+    if os.path.exists(summary_path):
+        with open(summary_path) as f:
+            summary = json.load(f)
+
+    web_summary = None
+    has_top_level_web = os.path.exists(web_summary_path)
+    if has_top_level_web:
+        with open(web_summary_path) as f:
+            web_summary = json.load(f)
+
+    # Also load analysis-subdirectory summaries
+    for entry in os.listdir(campaign_dir):
+        sub_summary = os.path.join(campaign_dir, entry, "summary.json")
+        if os.path.isdir(os.path.join(campaign_dir, entry)) and os.path.exists(sub_summary):
+            with open(sub_summary) as f:
+                sub_data = json.load(f)
+            # Merge into main summary (sub entries may overlap or supplement)
+            for dsname, task_data in sub_data.items():
+                if dsname not in summary:
+                    summary[dsname] = task_data
+            # Aggregate web_summary from subdirectories when top-level is missing
+            if not has_top_level_web:
+                sub_web = os.path.join(campaign_dir, entry, "web_summary.json")
+                if os.path.exists(sub_web):
+                    with open(sub_web) as f:
+                        sub_web_data = json.load(f)
+                    if web_summary is None:
+                        web_summary = sub_web_data
+                    else:
+                        web_summary.setdefault("tasks", []).extend(sub_web_data.get("tasks", []))
+
+    if not summary:
+        return None, None
+
+    return summary, web_summary
+
+
+def main(args):
+    if args.list:
+        list_campaigns()
+        return
+
+    if not args.campaign:
+        print("Usage: mreport <campaign> or mreport -l")
+        print("Run 'mreport -l' to list available campaigns.")
+        return
+
+    do_color = not args.nocolor and not args.csv
+
+    summary, web_summary = load_campaign(args.campaign)
+    if summary is None:
+        print("Campaign '{}' not found in ~/public_html/.".format(args.campaign))
+        print("Run 'mreport -l' to list available campaigns.")
+        return
+
+    # Build per-sample data
+    samples = {}
+    all_job_ids = []
+    job_id_to_sample = {}
+
+    for dsname, task_data in summary.items():
+        short_name = shorten_dataset(dsname)
+
+        # Pattern filter
+        if args.pattern:
+            pat = '*{}*'.format(args.pattern)
+            if not fnmatch(short_name, pat) and not fnmatch(dsname, pat):
+                continue
+
+        jobs = task_data.get("jobs", {})
+        njobs = len(jobs)
+        njobs_done = sum(1 for j in jobs.values()
+                         if j.get("output_exists") and not j.get("is_on_condor"))
+
+        # Count input files and events
+        ninput_files = 0
+        ninput_events = 0
+        noutput_events = 0
+        retries = 0
+        job_ids = []
+
+        for jnum, jdata in jobs.items():
+            inputs = jdata.get("inputs", [])
+            ninput_files += len(inputs)
+            ninput_events += sum(inp[1] for inp in inputs if len(inp) > 1)
+
+            if jdata.get("output_exists") and jdata.get("output"):
+                out = jdata["output"]
+                if len(out) > 1:
+                    noutput_events += out[1]
+
+            condor_jobs = jdata.get("condor_jobs", [])
+            retries += max(0, len(condor_jobs) - 1)
+            for cj in condor_jobs:
+                jid = cj.get("cluster_id", "")
+                if jid:
+                    job_ids.append(jid)
+                    job_id_to_sample[jid] = short_name
+                    all_job_ids.append(jid)
+
+        queried_nevents = task_data.get("queried_nevents", 0)
+
+        if short_name in samples:
+            # Merge (same process, different eras already merged by shorten)
+            s = samples[short_name]
+            s['njobs'] += njobs
+            s['njobs_done'] += njobs_done
+            s['ninput_files'] += ninput_files
+            s['ninput_events'] += ninput_events
+            s['noutput_events'] += noutput_events
+            s['queried_nevents'] += queried_nevents
+            s['retries'] += retries
+            s['job_ids'].extend(job_ids)
+            s['datasets'].append(dsname)
+        else:
+            samples[short_name] = {
+                'njobs': njobs,
+                'njobs_done': njobs_done,
+                'ninput_files': ninput_files,
+                'ninput_events': ninput_events,
+                'noutput_events': noutput_events,
+                'queried_nevents': queried_nevents,
+                'retries': retries,
+                'job_ids': job_ids,
+                'datasets': [dsname],
+            }
+
+    if not samples:
+        print("No samples found{}.".format(
+            " matching '{}'".format(args.pattern) if args.pattern else ""))
+        return
+
+    # Get timing from sacct if requested
+    timings = {}
+    if args.time:
+        sys.stderr.write("Querying sacct for {} job IDs...\n".format(len(all_job_ids)))
+        timings = get_sacct_timing(all_job_ids)
+        sys.stderr.write("Got timing for {} jobs.\n".format(len(timings)))
+
+        # Aggregate timing per sample
+        for sname, sdata in samples.items():
+            elapsed_list = []
+            cpu_seconds_list = []
+            for jid in sdata['job_ids']:
+                if jid in timings:
+                    elapsed_list.append(timings[jid]['elapsed'])
+                    cpu_seconds_list.append(timings[jid]['cpu_seconds'])
+            sdata['elapsed_list'] = elapsed_list
+            sdata['total_cpu_seconds'] = sum(cpu_seconds_list)
+            sdata['avg_job_seconds'] = (sum(elapsed_list) / len(elapsed_list)) if elapsed_list else 0
+            sdata['max_job_seconds'] = max(elapsed_list) if elapsed_list else 0
+
+    # Sort
+    if args.sort == 'name':
+        sorted_samples = sorted(samples.items(), key=lambda x: x[0])
+    elif args.sort == 'events':
+        sorted_samples = sorted(samples.items(), key=lambda x: x[1]['ninput_events'], reverse=True)
+    elif args.sort == 'jobs':
+        sorted_samples = sorted(samples.items(), key=lambda x: x[1]['njobs'], reverse=True)
+    elif args.sort == 'time' and args.time:
+        sorted_samples = sorted(samples.items(), key=lambda x: x[1].get('total_cpu_seconds', 0), reverse=True)
+    else:
+        sorted_samples = sorted(samples.items(), key=lambda x: x[1]['ninput_events'], reverse=True)
+
+    # CSV output
+    if args.csv:
+        header = ["Sample", "Datasets", "Jobs", "Done", "Retries",
+                  "InputFiles", "InputEvents", "OutputEvents", "QueriedEvents"]
+        if args.time:
+            header += ["TotalCPU_s", "AvgJob_s", "MaxJob_s", "EvtRate_evt/s"]
+        print(",".join(header))
+        for sname, sdata in sorted_samples:
+            row = [
+                sname,
+                str(len(sdata['datasets'])),
+                str(sdata['njobs']),
+                str(sdata['njobs_done']),
+                str(sdata['retries']),
+                str(sdata['ninput_files']),
+                str(sdata['ninput_events']),
+                str(sdata['noutput_events']),
+                str(sdata['queried_nevents']),
+            ]
+            if args.time:
+                cpu = sdata.get('total_cpu_seconds', 0)
+                avg = sdata.get('avg_job_seconds', 0)
+                mx = sdata.get('max_job_seconds', 0)
+                rate = sdata['ninput_events'] / cpu if cpu > 0 else 0
+                row += [str(int(cpu)), str(int(avg)), str(int(mx)), "{:.1f}".format(rate)]
+            print(",".join(row))
+        return
+
+    # Header
+    print()
+    print(colorize("Campaign Report: {}".format(args.campaign), BOLD, do_color))
+    print()
+
+    # Grand totals
+    total_samples = len(sorted_samples)
+    total_datasets = sum(len(s['datasets']) for _, s in sorted_samples)
+    total_jobs = sum(s['njobs'] for _, s in sorted_samples)
+    total_done = sum(s['njobs_done'] for _, s in sorted_samples)
+    total_retries = sum(s['retries'] for _, s in sorted_samples)
+    total_input_files = sum(s['ninput_files'] for _, s in sorted_samples)
+    total_input_events = sum(s['ninput_events'] for _, s in sorted_samples)
+    total_output_events = sum(s['noutput_events'] for _, s in sorted_samples)
+
+    completion = total_done / total_jobs * 100 if total_jobs > 0 else 0
+    comp_color = GREEN if completion == 100 else (YELLOW if completion > 80 else RED)
+
+    print("  Samples: {:<6d}  Datasets: {:<6d}  Input files: {}".format(
+        total_samples, total_datasets, total_input_files))
+    print("  Jobs:    {:<6d}  Done: {}  Retries: {}".format(
+        total_jobs,
+        colorize("{} ({:.0f}%)".format(total_done, completion), comp_color, do_color),
+        total_retries))
+    print("  Input events:  {}  ({})".format(
+        colorize("{:>14,d}".format(total_input_events), CYAN, do_color),
+        format_nevents(total_input_events)))
+    print("  Output events: {}  ({})".format(
+        colorize("{:>14,d}".format(total_output_events), CYAN, do_color),
+        format_nevents(total_output_events)))
+
+    if args.time:
+        total_cpu = sum(s.get('total_cpu_seconds', 0) for _, s in sorted_samples)
+        overall_rate = total_input_events / total_cpu if total_cpu > 0 else 0
+        print("  Total CPU time: {}  ({:.1f} CPU-hours)".format(
+            colorize(format_duration(total_cpu), MAGENTA, do_color),
+            total_cpu / 3600))
+        print("  Effective event rate: {} evt/s".format(
+            colorize("{:,.0f}".format(overall_rate), GREEN, do_color)))
+
+    print()
+
+    # Table
+    nw = args.width
+
+    # Column headers
+    col_hdr = "{:>5s} {:>5s} {:>4s} {:>6s} {:>10s} {:>10s}".format(
+        "Jobs", "Done", "Rtry", "Files", "InEvents", "OutEvents")
+    if args.time:
+        col_hdr += " {:>8s} {:>7s} {:>7s} {:>9s}".format(
+            "CPU", "Avg", "Max", "Rate")
+
+    header_line = "  {:<{nw}s}  {}".format("Sample", col_hdr, nw=nw)
+    print(colorize(header_line, DIM, do_color))
+    sep_len = nw + 2 + 5 + 1 + 5 + 1 + 4 + 1 + 6 + 1 + 10 + 1 + 10
+    if args.time:
+        sep_len += 1 + 8 + 1 + 7 + 1 + 7 + 1 + 9
+    print(colorize("  " + "-" * sep_len, DIM, do_color))
+
+    for sname, sdata in sorted_samples:
+        display_name = sname
+        if len(display_name) > nw:
+            display_name = display_name[:nw - 3] + "..."
+
+        if sdata['njobs_done'] == sdata['njobs']:
+            done_color = GREEN
+        elif sdata['njobs_done'] > 0:
+            done_color = YELLOW
+        else:
+            done_color = RED
+
+        retry_color = YELLOW if sdata['retries'] > 0 else ''
+
+        cols = "{} {} {} {:>6d} {:>10s} {:>10s}".format(
+            str(sdata['njobs']).rjust(5),
+            rjust_color(sdata['njobs_done'], 5, done_color, do_color),
+            rjust_color(sdata['retries'], 4, retry_color, do_color),
+            sdata['ninput_files'],
+            format_nevents(sdata['ninput_events']),
+            format_nevents(sdata['noutput_events']),
+        )
+
+        if args.time:
+            cpu = sdata.get('total_cpu_seconds', 0)
+            avg = sdata.get('avg_job_seconds', 0)
+            mx = sdata.get('max_job_seconds', 0)
+            rate = sdata['ninput_events'] / cpu if cpu > 0 else 0
+            time_cols = " {:>8s} {:>7s} {:>7s} {:>8s}".format(
+                format_duration(cpu),
+                format_duration(avg),
+                format_duration(mx),
+                "{:.0f}/s".format(rate) if rate > 0 else "-",
+            )
+            cols += time_cols
+
+        print("  {:<{nw}s}  {}".format(display_name, cols, nw=nw))
+
+    # Totals row
+    print(colorize("  " + "-" * sep_len, DIM, do_color))
+    total_label_text = "Total ({} samples)".format(total_samples)
+    total_label = colorize("{:<{nw}s}".format(total_label_text, nw=nw), BOLD, do_color)
+    total_done_color = GREEN if total_done == total_jobs else YELLOW
+
+    tcols = "{} {} {:>4d} {:>6d} {:>10s} {:>10s}".format(
+        str(total_jobs).rjust(5),
+        rjust_color(total_done, 5, total_done_color, do_color),
+        total_retries,
+        total_input_files,
+        format_nevents(total_input_events),
+        format_nevents(total_output_events),
+    )
+
+    if args.time:
+        total_cpu = sum(s.get('total_cpu_seconds', 0) for _, s in sorted_samples)
+        overall_rate = total_input_events / total_cpu if total_cpu > 0 else 0
+        tcols += " {:>8s} {:>7s} {:>7s} {:>8s}".format(
+            format_duration(total_cpu),
+            "-", "-",
+            "{:.0f}/s".format(overall_rate) if overall_rate > 0 else "-",
+        )
+    print("  {}  {}".format(total_label, tcols))
+    print()
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Metis Campaign Report - post-campaign summary",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  mreport -l                                  list available campaigns
+  mreport Run2_Bkg_v15_03Mar2026_v3           basic report
+  mreport Run2_Bkg_v15_03Mar2026_v3 -t        include timing from sacct
+  mreport Run2_Bkg_v15_03Mar2026_v3 -p TT     filter for "TT" samples
+  mreport Run2_Bkg_v15_03Mar2026_v3 --csv     CSV output for further analysis""",
+    )
+    parser.add_argument("campaign", nargs="?", help="campaign name (directory in ~/public_html/)")
+    parser.add_argument("-l", "--list", help="list available campaigns", action="store_true")
+    parser.add_argument("-t", "--time", help="query sacct for per-job timing (slower)", action="store_true")
+    parser.add_argument("-p", "--pattern", help="filter samples by pattern", default="")
+    parser.add_argument("-s", "--sort", help="sort order", default="events",
+                        choices=["events", "name", "jobs", "time"])
+    parser.add_argument("-w", "--width", help="max width for sample name column", default=55, type=int)
+    parser.add_argument("-c", "--nocolor", help="disable colors", action="store_true")
+    parser.add_argument("--csv", help="output as CSV", action="store_true")
+
+    args = parser.parse_args()
+    main(args)

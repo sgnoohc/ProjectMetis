@@ -124,7 +124,7 @@ def main(args):
         ending = ""
         if done == total:
             ending = " [DONE]"
-        tag_short = "[{}]".format(tag[:15])
+        tag_short = "[{}]".format(tag[:35])
         print(("{:<17s} {} {:3.0f}%% [{:4d}/{:4d}] {:<%is}{}" % dswidth).format(tag_short, progress, 100.0*fraction, done, total, dataset_short, ending))
 
         if verbosity > 0:

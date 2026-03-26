@@ -18,7 +18,7 @@ class Task(object):
 
         self.hash = self.get_task_hash()
         self.logger = logging.getLogger(setup_logger())
-        self.basedir = "./"
+        self.basedir = kwargs.get("basedir", "./")
         if not hasattr(self, "unique_name"):
             self.unique_name = self.hash
         # if not hasattr(self, "to_backup"):

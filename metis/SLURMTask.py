@@ -1,5 +1,6 @@
 import os
 import time
+import glob
 
 from metis.Constants import Constants
 from metis.CondorTask import CondorTask
@@ -59,17 +60,61 @@ class SLURMTask(CondorTask):
         """
         return self.get_running_slurm_jobs()
 
-    def get_running_slurm_jobs(self):
+    def get_running_slurm_jobs(self, cached_all_jobs=None):
         """
         Get list of dictionaries for SLURM jobs belonging to this task.
         Job names follow the convention: {unique_name}__{jobnum}
+        Also checks packed jobs via manifest files.
+
+        :param cached_all_jobs: optional pre-fetched list from Utils.slurm_q()
+                                to avoid repeated squeue calls
         """
-        jobs = Utils.slurm_q(job_name_pattern="{0}__".format(self.unique_name))
+        if cached_all_jobs is not None:
+            prefix = "{0}__".format(self.unique_name)
+            jobs = [dict(j) for j in cached_all_jobs if j["JobName"].startswith(prefix)]
+        else:
+            jobs = Utils.slurm_q(job_name_pattern="{0}__".format(self.unique_name))
         # Map fields to be compatible with CondorTask expectations
         for job in jobs:
             job["ClusterId"] = job["JobId"]
             job["JobStatus"] = job["State"]
+
+        # Also check packed jobs for indices belonging to this task
+        if cached_all_jobs is not None:
+            packed_jobs = [j for j in cached_all_jobs if j["JobName"].startswith("packed__")]
+        else:
+            packed_jobs = Utils.slurm_q(job_name_pattern="packed__")
+        for pjob in packed_jobs:
+            job_id = pjob["JobId"]
+            manifest_path = self._find_packed_manifest(job_id)
+            if not manifest_path:
+                continue
+            try:
+                with open(manifest_path) as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 2 and parts[0] == self.unique_name:
+                            idx = int(parts[1])
+                            entry = dict(pjob)
+                            entry["jobnum"] = idx
+                            entry["ClusterId"] = pjob["JobId"]
+                            entry["JobStatus"] = pjob["State"]
+                            jobs.append(entry)
+            except (IOError, OSError):
+                pass
+
         return jobs
+
+    def _find_packed_manifest(self, job_id):
+        """
+        Search for a packed manifest file matching the given SLURM job ID.
+        Manifests are stored as packed_{job_id}.manifest in task log directories.
+        """
+        logdir = os.path.abspath("{0}/logs/".format(self.get_taskdir()))
+        path = os.path.join(logdir, "packed_{0}.manifest".format(job_id))
+        if os.path.exists(path):
+            return path
+        return None
 
     def handle_condor_job(self, this_job_dict, out, fake=False, remove_running_x_hours=48.0, remove_held_x_hours=5.0):
         """
@@ -80,7 +125,9 @@ class SLURMTask(CondorTask):
                                       remove_running_x_hours=remove_running_x_hours,
                                       remove_held_x_hours=remove_held_x_hours)
 
-    def handle_slurm_job(self, this_job_dict, out, fake=False, remove_running_x_hours=48.0, remove_held_x_hours=5.0):
+    def handle_slurm_job(self, this_job_dict, out, fake=False,
+                         remove_running_x_hours=48.0, remove_held_x_hours=5.0,
+                         remove_stale_log_minutes=30.0):
         """
         Takes `out` (File object) and dictionary of SLURM job info.
         Returns action_type string specifying the action taken.
@@ -106,6 +153,25 @@ class SLURMTask(CondorTask):
                 if not fake:
                     Utils.slurm_rm([job_id])
                 action_type = "LONG_RUNNING_REMOVED"
+
+            elif hours_since > 0.5 and remove_stale_log_minutes > 0:
+                logfile = os.path.join(
+                    os.path.abspath(self.get_taskdir()),
+                    "logs", "std_logs", "slurm_{}.out".format(job_id)
+                )
+                log_stale = False
+                if not os.path.exists(logfile):
+                    log_stale = True
+                else:
+                    log_age_min = (time.time() - os.path.getmtime(logfile)) / 60.0
+                    if log_age_min > remove_stale_log_minutes:
+                        log_stale = True
+                if log_stale:
+                    self.logger.info("SLURM job {} for ({}) cancelled: no log activity for >{} min".format(
+                        job_id, out, remove_stale_log_minutes))
+                    if not fake:
+                        Utils.slurm_rm([job_id])
+                    action_type = "STALE_LOG_REMOVED"
 
         elif idle:
             self.logger.debug("SLURM job {0} for ({1}) pending for {2:.1f} hrs".format(job_id, out, hours_since))
@@ -200,6 +266,48 @@ class SLURMTask(CondorTask):
         combined_id = ",".join(job_ids) if job_ids else "-1"
         return all_succeeded, combined_id
 
+    def get_pending_items(self, cached_all_jobs=None):
+        """
+        Return list of pending work items that need submission.
+        Each item is a dict with keys: ins, out, task.
+        Also handles done outputs and updates running job status.
+        Does NOT submit anything.
+
+        :param cached_all_jobs: optional pre-fetched list from Utils.slurm_q()
+                                to avoid repeated squeue calls
+        """
+        slurm_job_dicts = self.get_running_slurm_jobs(cached_all_jobs=cached_all_jobs)
+        slurm_job_indices = set(int(rj["jobnum"]) for rj in slurm_job_dicts if rj["jobnum"] >= 0)
+
+        nfiles_reset = self.recache_outputs()
+        if nfiles_reset > 0:
+            self.logger.info("{0} files may have been deleted".format(nfiles_reset))
+
+        pending = []
+
+        for iout, (ins, out) in enumerate(self.io_mapping):
+            if self.max_jobs > 0 and iout >= self.max_jobs:
+                break
+
+            index = out.get_index()
+            on_slurm = index in slurm_job_indices
+            done = (out.exists() and not on_slurm)
+            if done:
+                self.handle_done_output(out)
+                continue
+
+            if not on_slurm:
+                pending.append({
+                    "ins": ins,
+                    "out": out,
+                    "task": self,
+                })
+            else:
+                this_job_dict = next(rj for rj in slurm_job_dicts if int(rj["jobnum"]) == index)
+                self.handle_slurm_job(this_job_dict, out, remove_running_x_hours=12.0)
+
+        return pending
+
     def run(self, fake=False, optimizer=None):
         """
         Main logic for looping through (inputs,output) pairs.
@@ -235,7 +343,7 @@ class SLURMTask(CondorTask):
                 })
             else:
                 this_job_dict = next(rj for rj in slurm_job_dicts if int(rj["jobnum"]) == index)
-                self.handle_slurm_job(this_job_dict, out)
+                self.handle_slurm_job(this_job_dict, out, remove_running_x_hours=12.0)
 
         if to_submit:
             v_ins = [d["ins"] for d in to_submit]
@@ -266,15 +374,18 @@ class SLURMTask(CondorTask):
             self.logger.info("Tail root file {} removed".format(fname))
         self.io_mapping = new_mapping
 
-    def get_task_summary(self):
+    def get_task_summary(self, cached_all_jobs=None):
         """
         Returns a dictionary with mapping and SLURM job info/history.
         Mirrors CondorTask.get_task_summary() but uses SLURM job IDs and log paths.
+
+        :param cached_all_jobs: optional pre-fetched list from Utils.slurm_q()
+                                to avoid repeated squeue calls
         """
         logdir_full = os.path.abspath("{0}/logs/std_logs/".format(self.get_taskdir())) + "/"
 
         d_onslurm = {}
-        for job in self.get_running_slurm_jobs():
+        for job in self.get_running_slurm_jobs(cached_all_jobs=cached_all_jobs):
             d_onslurm[job["JobId"]] = job
 
         d_history = self.get_job_submission_history()

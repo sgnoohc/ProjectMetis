@@ -1,0 +1,441 @@
+#!/usr/bin/env python3
+
+"""
+mq - Metis Queue Monitor
+
+Shows SLURMTask jobs from squeue grouped by task name, campaign, or analysis.
+Non-SLURMTask jobs are summarized separately.
+
+Examples:
+    mq                          # default: group by task, sort by total count
+    mq -g campaign              # group by campaign tag (e.g., Run3_Data_v15_03Mar2026_v1)
+    mq -g analysis              # group by analysis channel (e.g., 1Lep1FJ)
+    mq -p Muon                  # filter for jobs matching "Muon"
+    mq -s running               # sort by number of running jobs
+    mq -t                       # show avg/max run time per group
+    mq -a                       # also show non-SLURMTask job details
+"""
+
+import subprocess
+import argparse
+import re
+import os
+from collections import defaultdict
+from fnmatch import fnmatch
+
+
+BOLD = '\033[1m'
+DIM = '\033[2m'
+GREEN = '\033[92m'
+RED = '\033[91m'
+YELLOW = '\033[93m'
+BLUE = '\033[94m'
+CYAN = '\033[96m'
+ENDC = '\033[0m'
+
+STATE_COLORS = {
+    'R': GREEN,
+    'PD': YELLOW,
+    'CG': CYAN,
+    'CF': BLUE,
+    'F': RED,
+    'TO': RED,
+    'CA': RED,
+    'NF': RED,
+}
+
+STATE_LABELS = {
+    'R': 'Running',
+    'PD': 'Pending',
+    'CG': 'Completing',
+    'CF': 'Configuring',
+    'F': 'Failed',
+    'TO': 'Timeout',
+    'CA': 'Cancelled',
+    'NF': 'Node Fail',
+}
+
+# Canonical state order for column display
+STATE_ORDER = ['R', 'PD', 'CG', 'CF', 'F', 'TO', 'CA', 'NF']
+
+
+def get_squeue_jobs():
+    user = os.environ.get("USER", "")
+    cmd = ["squeue", "-u", user, "-o", "%i|%t|%M|%P|%j|%o", "--noheader"]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            return []
+    except Exception:
+        return []
+
+    jobs = []
+    for line in result.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = line.strip().split('|')
+        if len(parts) >= 5:
+            jobs.append({
+                'id': parts[0].strip(),
+                'state': parts[1].strip(),
+                'time': parts[2].strip(),
+                'partition': parts[3].strip(),
+                'name': parts[4].strip(),
+                'command': parts[5].strip() if len(parts) >= 6 else '',
+            })
+    return jobs
+
+
+def parse_task_name(name):
+    """Parse a SLURMTask job name into components.
+
+    Job name format: SLURMTask_{dataset}_{tag}__{jobnum}
+    Tag format: {run}_{type}_{nano}_{date}_{version}_{analysis}
+    """
+    # Strip the __jobnum suffix
+    task = re.sub(r'__\d+$', '', name)
+
+    # Strip SLURMTask_ prefix for display
+    display = task[len('SLURMTask_'):] if task.startswith('SLURMTask_') else task
+
+    # Extract campaign tag: Run{N}_{Type}_{nano}_{ddMMMyyy}_{vN}
+    m = re.search(r'(Run\d+_\w+?_\w+?_\d{2}[A-Z][a-z]{2}\d{4}_v\d+)', display)
+    if m:
+        campaign = m.group(1)
+        after = display[m.end():]
+        analysis = after.lstrip('_') if after else ''
+        dataset = display[:m.start()].rstrip('_')
+    else:
+        campaign = ''
+        analysis = ''
+        dataset = display
+
+    return {
+        'task': task,
+        'display': display,
+        'dataset': dataset,
+        'campaign': campaign,
+        'analysis': analysis,
+    }
+
+
+def parse_time_to_seconds(time_str):
+    """Parse SLURM time format to seconds.
+
+    Formats: MM:SS, H:MM:SS, D-HH:MM:SS
+    """
+    days = 0
+    if '-' in time_str:
+        day_part, time_str = time_str.split('-', 1)
+        days = int(day_part)
+    parts = time_str.split(':')
+    if len(parts) == 3:
+        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    elif len(parts) == 2:
+        h, m, s = 0, int(parts[0]), int(parts[1])
+    else:
+        return 0
+    return days * 86400 + h * 3600 + m * 60 + s
+
+
+def format_duration(seconds):
+    """Format seconds into a compact human-readable string."""
+    if seconds < 60:
+        return "{}s".format(int(seconds))
+    elif seconds < 3600:
+        m = int(seconds) // 60
+        s = int(seconds) % 60
+        return "{}m{:02d}s".format(m, s)
+    elif seconds < 86400:
+        h = int(seconds) // 3600
+        m = (int(seconds) % 3600) // 60
+        return "{}h{:02d}m".format(h, m)
+    else:
+        d = int(seconds) // 86400
+        h = (int(seconds) % 86400) // 3600
+        return "{}d{:02d}h".format(d, h)
+
+
+def colorize(text, color, do_color):
+    if do_color and color:
+        return "{}{}{}".format(color, text, ENDC)
+    return text
+
+
+def _find_packed_manifest(job):
+    """Return path to packed manifest file if it exists, else None."""
+    command = job.get('command', '')
+    if not command:
+        return None
+    logdir = os.path.dirname(command)
+    if not logdir:
+        return None
+    manifest = os.path.join(logdir, "packed_{}.manifest".format(job['id']))
+    if os.path.isfile(manifest):
+        return manifest
+    return None
+
+
+def expand_packed_jobs(packed_jobs):
+    """Expand packed jobs into synthetic SLURMTask sub-jobs via manifests.
+
+    Returns (expanded, unexpanded) where expanded is a list of synthetic job
+    dicts and unexpanded is a list of packed jobs whose manifests weren't found.
+    """
+    expanded = []
+    unexpanded = []
+    for job in packed_jobs:
+        manifest = _find_packed_manifest(job)
+        if manifest is None:
+            unexpanded.append(job)
+            continue
+        try:
+            with open(manifest) as f:
+                for line in f:
+                    parts = line.strip().split('\t')
+                    if len(parts) < 2:
+                        continue
+                    task_name = parts[0]
+                    index = parts[1]
+                    synthetic_name = "SLURMTask_{}__{}" .format(task_name, index)
+                    expanded.append({
+                        'id': job['id'],
+                        'state': job['state'],
+                        'time': job['time'],
+                        'partition': job['partition'],
+                        'name': synthetic_name,
+                        'command': job['command'],
+                    })
+        except (IOError, OSError):
+            unexpanded.append(job)
+    return expanded, unexpanded
+
+
+def main(args):
+    jobs = get_squeue_jobs()
+    if not jobs:
+        print("No jobs in queue.")
+        return
+
+    do_color = not args.nocolor
+
+    slurm_jobs = []
+    packed_jobs = []
+    other_jobs = []
+    for job in jobs:
+        if job['name'].startswith('SLURMTask'):
+            slurm_jobs.append(job)
+        elif job['name'].startswith('packed__'):
+            packed_jobs.append(job)
+        else:
+            other_jobs.append(job)
+
+    if packed_jobs:
+        expanded, unexpanded = expand_packed_jobs(packed_jobs)
+        slurm_jobs.extend(expanded)
+        other_jobs.extend(unexpanded)
+
+    if not slurm_jobs:
+        print("No SLURMTask jobs in queue.")
+        if other_jobs:
+            print()
+            print("{} other non-Metis job(s):".format(len(other_jobs)))
+            for job in other_jobs:
+                print("  {:>10s}  {:>2s}  {:>10s}  {}".format(
+                    job['id'], job['state'], job['time'], job['name']))
+        return
+
+    # Parse task names
+    for job in slurm_jobs:
+        job.update(parse_task_name(job['name']))
+
+    # Apply pattern filter
+    if args.pattern:
+        pat = '*{}*'.format(args.pattern)
+        slurm_jobs = [j for j in slurm_jobs if fnmatch(j['display'], pat)]
+
+    if not slurm_jobs:
+        print("No SLURMTask jobs matching pattern '{}'.".format(args.pattern))
+        return
+
+    # Grouping
+    if args.group == 'campaign':
+        group_key = lambda j: j['campaign'] or 'unknown'
+    elif args.group == 'analysis':
+        group_key = lambda j: j['analysis'] or 'unknown'
+    else:
+        group_key = lambda j: j['display']
+
+    # Aggregate counts per group per state, and collect run times
+    groups = defaultdict(lambda: defaultdict(int))
+    group_times = defaultdict(list)  # group -> list of seconds for running jobs
+    for job in slurm_jobs:
+        key = group_key(job)
+        groups[key][job['state']] += 1
+        if job['state'] == 'R':
+            secs = parse_time_to_seconds(job['time'])
+            group_times[key].append(secs)
+
+    # Determine which states are present, in canonical order
+    present_states = set(s for counts in groups.values() for s in counts)
+    states = [s for s in STATE_ORDER if s in present_states]
+    # Any states not in STATE_ORDER go at the end
+    for s in sorted(present_states):
+        if s not in states:
+            states.append(s)
+
+    # Sort groups
+    if args.sort == 'name':
+        sorted_groups = sorted(groups.items(), key=lambda x: x[0])
+    elif args.sort == 'running':
+        sorted_groups = sorted(groups.items(), key=lambda x: x[1].get('R', 0), reverse=True)
+    elif args.sort == 'pending':
+        sorted_groups = sorted(groups.items(), key=lambda x: x[1].get('PD', 0), reverse=True)
+    else:
+        sorted_groups = sorted(groups.items(), key=lambda x: sum(x[1].values()), reverse=True)
+
+    # Totals
+    totals = defaultdict(int)
+    for counts in groups.values():
+        for state, n in counts.items():
+            totals[state] += n
+    total_jobs = sum(totals.values())
+
+    # Header summary
+    summary_parts = []
+    for s in states:
+        n = totals.get(s, 0)
+        if n > 0:
+            label = colorize("{} {}".format(n, s), STATE_COLORS.get(s), do_color)
+            summary_parts.append(label)
+    summary_str = ", ".join(summary_parts)
+
+    print(colorize("Metis Queue", BOLD, do_color) +
+          " ({} = {} SLURMTask jobs)".format(summary_str, total_jobs))
+    print()
+
+    # Column widths
+    name_width = args.width
+    if name_width < 0:
+        name_width = max(len(k) for k, _ in sorted_groups)
+
+    col_w = 6
+    group_label = "Task" if args.group == 'task' else args.group.capitalize()
+
+    # Time column config
+    show_time = args.time
+    time_col_w = 8
+
+    # State headers
+    state_hdr = "".join("{:>{w}s}".format(s, w=col_w) for s in states)
+    total_hdr = "{:>{w}s}".format("Total", w=col_w)
+    time_hdr = ""
+    if show_time:
+        time_hdr = "{:>{w}s}{:>{w}s}".format("Avg T", "Max T", w=time_col_w)
+
+    # Header line
+    header = "  {:<{nw}s}  {}{}{}".format(group_label, state_hdr, total_hdr, time_hdr, nw=name_width)
+    print(colorize(header, DIM, do_color))
+    sep_len = name_width + 2 + col_w * (len(states) + 1)
+    if show_time:
+        sep_len += time_col_w * 2
+    print(colorize("  " + "-" * sep_len, DIM, do_color))
+
+    # Rows
+    for name, counts in sorted_groups:
+        display_name = name
+        if len(display_name) > name_width:
+            display_name = display_name[:name_width - 3] + "..."
+
+        cols = ""
+        for s in states:
+            n = counts.get(s, 0)
+            if n == 0:
+                cols += "{:>{w}s}".format(".", w=col_w)
+            else:
+                cell = "{:>{w}d}".format(n, w=col_w)
+                cols += colorize(cell, STATE_COLORS.get(s), do_color)
+
+        row_total = sum(counts.values())
+        cols += "{:>{w}d}".format(row_total, w=col_w)
+
+        if show_time:
+            times = group_times.get(name, [])
+            if times:
+                avg_t = sum(times) / len(times)
+                max_t = max(times)
+                avg_str = format_duration(avg_t)
+                max_str = format_duration(max_t)
+                cols += colorize("{:>{w}s}".format(avg_str, w=time_col_w), DIM, do_color)
+                cols += colorize("{:>{w}s}".format(max_str, w=time_col_w), CYAN, do_color)
+            else:
+                cols += "{:>{w}s}{:>{w}s}".format("-", "-", w=time_col_w)
+
+        print("  {:<{nw}s}  {}".format(display_name, cols, nw=name_width))
+
+    # Totals row
+    print(colorize("  " + "-" * sep_len, DIM, do_color))
+    total_label = "Total ({} groups)".format(len(sorted_groups))
+    tcols = ""
+    for s in states:
+        n = totals.get(s, 0)
+        cell = "{:>{w}d}".format(n, w=col_w)
+        tcols += colorize(cell, STATE_COLORS.get(s), do_color)
+    tcols += colorize("{:>{w}d}".format(total_jobs, w=col_w), BOLD, do_color)
+    if show_time:
+        all_times = [t for times in group_times.values() for t in times]
+        if all_times:
+            avg_t = sum(all_times) / len(all_times)
+            max_t = max(all_times)
+            tcols += colorize("{:>{w}s}".format(format_duration(avg_t), w=time_col_w), DIM, do_color)
+            tcols += colorize("{:>{w}s}".format(format_duration(max_t), w=time_col_w), CYAN, do_color)
+        else:
+            tcols += "{:>{w}s}{:>{w}s}".format("-", "-", w=time_col_w)
+    print("  {:<{nw}s}  {}".format(colorize(total_label, BOLD, do_color), tcols, nw=name_width))
+
+    # Non-SLURMTask jobs
+    if other_jobs and args.all:
+        print()
+        print(colorize("Other jobs:", YELLOW, do_color))
+        for job in other_jobs:
+            state_color = STATE_COLORS.get(job['state'], '')
+            print("  {:>10s}  {}  {:>10s}  {}".format(
+                job['id'],
+                colorize("{:>2s}".format(job['state']), state_color, do_color),
+                job['time'],
+                job['name']))
+    elif other_jobs:
+        print()
+        other_states = defaultdict(int)
+        for j in other_jobs:
+            other_states[j['state']] += 1
+        parts = ["{} {}".format(n, s) for s, n in sorted(other_states.items())]
+        print(colorize("{} other non-Metis job(s)".format(len(other_jobs)), DIM, do_color) +
+              ": {}".format(", ".join(parts)))
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Metis Queue Monitor - show SLURMTask jobs grouped by task",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""examples:
+  mq                     group by task name (default)
+  mq -g campaign         group by campaign tag
+  mq -g analysis         group by analysis channel
+  mq -p Muon             filter for "Muon" tasks
+  mq -s running          sort by running count
+  mq -t                  show avg/max run time per group
+  mq -a                  show non-SLURMTask job details""",
+    )
+    parser.add_argument("-p", "--pattern", help="filter by pattern (wildcards assumed on both sides)", default="")
+    parser.add_argument("-g", "--group", help="grouping level", default="task",
+                        choices=["task", "campaign", "analysis"])
+    parser.add_argument("-s", "--sort", help="sort order", default="total",
+                        choices=["total", "name", "running", "pending"])
+    parser.add_argument("-w", "--width", help="max width for name column (-1 to fit all)", default=80, type=int)
+    parser.add_argument("-c", "--nocolor", help="disable colors", action="store_true")
+    parser.add_argument("-t", "--time", help="show avg and max run time per group (running jobs only)", action="store_true")
+    parser.add_argument("-a", "--all", help="show details of non-SLURMTask jobs", action="store_true")
+
+    args = parser.parse_args()
+    main(args)

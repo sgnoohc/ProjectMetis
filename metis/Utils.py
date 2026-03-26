@@ -180,12 +180,12 @@ class CustomFormatter(logging.Formatter): # pragma: no cover
         logging.Formatter.__init__(self, fmt)
 
     def format(self, record):
-        format_orig = self._fmt
-        if record.levelno == logging.DEBUG: self._fmt = CustomFormatter.dbg_fmt
-        elif record.levelno == logging.INFO: self._fmt = CustomFormatter.info_fmt
-        elif record.levelno == logging.ERROR: self._fmt = CustomFormatter.err_fmt
+        format_orig = self._style._fmt
+        if record.levelno == logging.DEBUG: self._style._fmt = CustomFormatter.dbg_fmt
+        elif record.levelno == logging.INFO: self._style._fmt = CustomFormatter.info_fmt
+        elif record.levelno == logging.ERROR: self._style._fmt = CustomFormatter.err_fmt
         result = logging.Formatter.format(self, record)
-        self._fmt = format_orig
+        self._style._fmt = format_orig
         return result
 
 def setup_logger(logger_name="logger_metis"): # pragma: no cover
@@ -524,8 +524,8 @@ def slurm_submit(**kwargs):
 
     template = """#!/bin/bash
 #SBATCH --job-name={job_name}
-#SBATCH --output={logdir}/std_logs/slurm_%j.out
-#SBATCH --error={logdir}/std_logs/slurm_%j.err
+#SBATCH --output=/tmp/slurm_%j.out
+#SBATCH --error=/tmp/slurm_%j.err
 #SBATCH --partition={partition}
 #SBATCH --qos={qos}
 {account_line}
@@ -536,11 +536,30 @@ def slurm_submit(**kwargs):
 {gpu_line}
 {extra_directives}
 
+SHARED_LOGDIR="{logdir}/std_logs"
+
+# Mirror local logs to shared filesystem in background for live tailing.
+# If the shared filesystem hangs, only the tee process blocks — the main
+# script keeps running and the local /tmp logs remain intact.
+_mirror_logs() {{
+    timeout 30 mkdir -p "$SHARED_LOGDIR" 2>/dev/null || return
+    tail -f --pid=$$ "/tmp/slurm_${{SLURM_JOB_ID}}.out" >> "$SHARED_LOGDIR/slurm_${{SLURM_JOB_ID}}.out" 2>/dev/null &
+    tail -f --pid=$$ "/tmp/slurm_${{SLURM_JOB_ID}}.err" >> "$SHARED_LOGDIR/slurm_${{SLURM_JOB_ID}}.err" 2>/dev/null &
+}}
+_mirror_logs
+
 echo "[slurm_wrapper] SLURM_JOB_ID = $SLURM_JOB_ID"
 echo "[slurm_wrapper] SLURM_JOB_NAME = $SLURM_JOB_NAME"
 echo "[slurm_wrapper] hostname = $(hostname)"
 echo "[slurm_wrapper] date = $(date)"
 echo "[slurm_wrapper] time = $(date +%s)"
+
+# Filesystem health check: fail fast if shared filesystem is hung
+if ! timeout 120 ls {logdir} > /dev/null 2>&1; then
+    echo "FATAL: Shared filesystem not accessible on $(hostname) after 120s. Exiting."
+    exit 1
+fi
+echo "[slurm_wrapper] Filesystem health check passed"
 
 STARTDIR=$(pwd)
 WORKDIR=${{SLURM_TMPDIR:-/tmp/slurm_$SLURM_JOB_ID}}
@@ -600,6 +619,21 @@ exit $RETVAL
         raise RuntimeError("Couldn't submit SLURM job because:\n----\n{0}\n----".format(out))
 
     return succeeded, job_id
+
+def _parse_slurm_duration(time_str):
+    """Parse SLURM duration string (D-HH:MM:SS or HH:MM:SS or MM:SS) to seconds."""
+    days = 0
+    if "-" in time_str:
+        days_str, time_str = time_str.split("-", 1)
+        days = int(days_str)
+    parts = time_str.split(":")
+    if len(parts) == 3:
+        h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+    elif len(parts) == 2:
+        h, m, s = 0, int(parts[0]), int(parts[1])
+    else:
+        return 0
+    return days * 86400 + h * 3600 + m * 60 + s
 
 def slurm_q(job_name_pattern=None, job_ids=None):
     """
@@ -668,7 +702,7 @@ def slurm_q(job_name_pattern=None, job_ids=None):
             "TimeUsed": time_used,
             "Reason": reason,
             "jobnum": jobnum,
-            "EnteredCurrentStatus": time.time(),  # SLURM squeue doesn't expose this directly; approximate with now
+            "EnteredCurrentStatus": time.time() - _parse_slurm_duration(time_used),
         }
         jobs.append(d)
 
@@ -678,6 +712,192 @@ def slurm_q(job_name_pattern=None, job_ids=None):
         jobs = [j for j in jobs if j["JobName"].startswith(prefix)]
 
     return jobs
+
+def slurm_submit_packed(pack_items, executable, inputfiles, logdir, **kwargs):
+    """
+    Submit a single SLURM job that runs multiple sub-jobs in parallel.
+
+    :param pack_items: list of dicts, each with keys:
+        - task_name: unique name of the parent SLURMTask
+        - index: output file index within that task
+        - arguments: list of arguments for this sub-job
+    :param executable: path to slurm_packed_executable.sh
+    :param inputfiles: list of shared input files (package.tar.gz, proxy, etc.)
+    :param logdir: directory for logs and manifest files
+    :param kwargs: SLURM directives (partition, qos, account, time, memory,
+                   cpus_per_task, cpus_per_subjob, gpus, modules, extra_directives)
+    :returns: (succeeded:bool, job_id:str)
+    """
+    if kwargs.get("fake", False):
+        return True, -1
+
+    params = {}
+    params["partition"] = kwargs.get("partition", "hpg-default")
+    params["qos"] = kwargs.get("qos", "normal")
+    params["account"] = kwargs.get("account", os.environ.get("SLURM_ACCOUNT", ""))
+    params["time"] = kwargs.get("time", "08:00:00")
+    params["memory"] = kwargs.get("memory", "{0}gb".format(len(pack_items) * 4))
+    params["cpus_per_task"] = kwargs.get("cpus_per_task", len(pack_items))
+    params["cpus_per_subjob"] = kwargs.get("cpus_per_subjob", 1)
+    params["gpus"] = kwargs.get("gpus", None)
+    params["modules"] = kwargs.get("modules", [])
+    params["extra_directives"] = kwargs.get("extra_directives", {})
+
+    do_cmd("mkdir -p {0}/std_logs/".format(logdir))
+
+    import uuid
+    pack_id = uuid.uuid4().hex[:12]
+
+    # Write manifest file (tab-separated)
+    manifest_path = os.path.join(logdir, "packed_manifest_{0}.tsv".format(pack_id))
+    with open(manifest_path, "w") as f:
+        for item in pack_items:
+            args_str = " ".join(map(str, item["arguments"]))
+            f.write("{0}\t{1}\t{2}\n".format(
+                item["task_name"], item["index"], args_str))
+
+    exe_dir = os.path.dirname(os.path.abspath(executable))
+
+    # Stage X509 proxy
+    proxy_file = get_proxy_file()
+    inputfiles = list(inputfiles)  # copy
+    if os.path.exists(proxy_file):
+        proxy_staged = os.path.join(logdir, "x509up_proxy")
+        if not os.path.exists(proxy_staged) or \
+           os.path.getmtime(proxy_file) > os.path.getmtime(proxy_staged):
+            import shutil
+            shutil.copy2(proxy_file, proxy_staged)
+        inputfiles.append(os.path.abspath(proxy_staged))
+
+    # Add manifest to input files so it's copied to working directory
+    inputfiles.append(os.path.abspath(manifest_path))
+
+    # Build input file copy commands
+    inputfiles_str = ""
+    if inputfiles:
+        inputfiles_str = "\n# Copy input files to working directory\n"
+        for f in inputfiles:
+            inputfiles_str += "cp {0} .\n".format(f)
+
+    gpu_line = ""
+    if params["gpus"]:
+        gpu_line = "#SBATCH --gpus={0}".format(params["gpus"])
+
+    account_line = ""
+    if params["account"]:
+        account_line = "#SBATCH --account={0}".format(params["account"])
+
+    extra_directives_str = ""
+    for key, val in params["extra_directives"].items():
+        extra_directives_str += "#SBATCH --{0}={1}\n".format(key, val)
+
+    modules_str = ""
+    if params["modules"]:
+        modules_str = "\n# Load modules\nmodule purge\n"
+        for mod in params["modules"]:
+            modules_str += "module load {0}\n".format(mod)
+
+    # Generate packed sbatch template
+    job_name = "packed__{0}".format(pack_id)
+
+    template = """#!/bin/bash
+#SBATCH --job-name={job_name}
+#SBATCH --output=/tmp/slurm_packed_%j.out
+#SBATCH --error=/tmp/slurm_packed_%j.err
+#SBATCH --partition={partition}
+#SBATCH --qos={qos}
+{account_line}
+#SBATCH --time={time}
+#SBATCH --mem={memory}
+#SBATCH --cpus-per-task={cpus_per_task}
+#SBATCH --ntasks=1
+{gpu_line}
+{extra_directives}
+
+SHARED_LOGDIR="{logdir}/std_logs"
+
+# Mirror local logs to shared filesystem in background for live tailing.
+# If the shared filesystem hangs, only the tail process blocks — the main
+# script keeps running and the local /tmp logs remain intact.
+_mirror_logs() {{
+    timeout 30 mkdir -p "$SHARED_LOGDIR" 2>/dev/null || return
+    tail -f --pid=$$ "/tmp/slurm_packed_${{SLURM_JOB_ID}}.out" >> "$SHARED_LOGDIR/slurm_${{SLURM_JOB_ID}}.out" 2>/dev/null &
+    tail -f --pid=$$ "/tmp/slurm_packed_${{SLURM_JOB_ID}}.err" >> "$SHARED_LOGDIR/slurm_${{SLURM_JOB_ID}}.err" 2>/dev/null &
+}}
+_mirror_logs
+
+echo "[packed] SLURM_JOB_ID = $SLURM_JOB_ID"
+echo "[packed] hostname = $(hostname)"
+echo "[packed] date = $(date)"
+echo "[packed] pack_size = {pack_size}"
+echo "[packed] cpus_per_subjob = {cpus_per_subjob}"
+
+# Filesystem health check: fail fast if shared filesystem is hung
+if ! timeout 120 ls {logdir} > /dev/null 2>&1; then
+    echo "FATAL: Shared filesystem not accessible on $(hostname) after 120s. Exiting."
+    exit 1
+fi
+echo "[packed] Filesystem health check passed"
+
+STARTDIR=$(pwd)
+WORKDIR=${{SLURM_TMPDIR:-/tmp/slurm_$SLURM_JOB_ID}}
+mkdir -p $WORKDIR
+cd $WORKDIR
+{modules}
+{input_files}
+# Set up X509 proxy if available
+if [ -f x509up_proxy ]; then
+    export X509_USER_PROXY=$(pwd)/x509up_proxy
+    echo "[packed] X509_USER_PROXY = $X509_USER_PROXY"
+fi
+
+chmod +x {executable_basename}
+export PACKED_CPUS_PER_SUBJOB={cpus_per_subjob}
+./{executable_basename} {manifest_basename}
+RETVAL=$?
+
+cd $STARTDIR
+exit $RETVAL
+""".format(
+        job_name=job_name,
+        logdir=logdir,
+        partition=params["partition"],
+        qos=params["qos"],
+        account_line=account_line,
+        time=params["time"],
+        memory=params["memory"],
+        cpus_per_task=params["cpus_per_task"],
+        gpu_line=gpu_line,
+        extra_directives=extra_directives_str,
+        modules=modules_str,
+        input_files=inputfiles_str,
+        executable_basename=os.path.basename(executable),
+        pack_size=len(pack_items),
+        cpus_per_subjob=params["cpus_per_subjob"],
+        manifest_basename=os.path.basename(manifest_path),
+    )
+
+    submit_file = "{0}/submit_packed_{1}.sh".format(logdir, pack_id)
+    with open(submit_file, "w") as fhout:
+        fhout.write(template)
+
+    out = do_cmd("sbatch {0}".format(submit_file))
+
+    succeeded = False
+    job_id = -1
+    if "Submitted batch job" in out:
+        succeeded = True
+        job_id = out.strip().split()[-1]
+    else:
+        raise RuntimeError("Couldn't submit packed SLURM job because:\n----\n{0}\n----".format(out))
+
+    # Copy manifest with job ID name for later lookup (keep original for running job)
+    import shutil
+    final_manifest = os.path.join(logdir, "packed_{0}.manifest".format(job_id))
+    shutil.copy2(manifest_path, final_manifest)
+
+    return succeeded, job_id
+
 
 def slurm_rm(job_ids=[]):
     """

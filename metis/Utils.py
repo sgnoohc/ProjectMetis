@@ -125,6 +125,11 @@ def do_cmd(cmd, returnStatus=False, dryRun=False):
     else: return out
 
 def get_proxy_file():
+    # Prefer proxy on shared filesystem (accessible from all nodes),
+    # fall back to node-local /tmp
+    shared = os.path.expanduser("~/private/x509_proxy")
+    if os.path.exists(shared):
+        return shared
     return "/tmp/x509up_u{0}".format(os.getuid())
 
 def get_timestamp():

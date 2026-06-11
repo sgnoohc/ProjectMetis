@@ -7,6 +7,14 @@ from metis.CondorTask import CondorTask
 import metis.Utils as Utils
 
 class SLURMTask(CondorTask):
+    # Class-level cache: manifest job_id -> [(task_name, index), ...]
+    # Avoids re-reading the same manifest file for every task
+    _manifest_cache = {}
+
+    @classmethod
+    def clear_manifest_cache(cls):
+        cls._manifest_cache.clear()
+
     def __init__(self, **kwargs):
         """
         SLURM-based task that extends CondorTask, overriding only
@@ -86,35 +94,40 @@ class SLURMTask(CondorTask):
             packed_jobs = Utils.slurm_q(job_name_pattern="packed__")
         for pjob in packed_jobs:
             job_id = pjob["JobId"]
-            manifest_path = self._find_packed_manifest(job_id)
-            if not manifest_path:
-                continue
-            try:
-                with open(manifest_path) as f:
-                    for line in f:
-                        parts = line.strip().split("\t")
-                        if len(parts) >= 2 and parts[0] == self.unique_name:
-                            idx = int(parts[1])
-                            entry = dict(pjob)
-                            entry["jobnum"] = idx
-                            entry["ClusterId"] = pjob["JobId"]
-                            entry["JobStatus"] = pjob["State"]
-                            jobs.append(entry)
-            except (IOError, OSError):
-                pass
+            entries = self._get_manifest_entries(job_id)
+            for task_name, idx in entries:
+                if task_name == self.unique_name:
+                    entry = dict(pjob)
+                    entry["jobnum"] = idx
+                    entry["ClusterId"] = pjob["JobId"]
+                    entry["JobStatus"] = pjob["State"]
+                    jobs.append(entry)
 
         return jobs
 
-    def _find_packed_manifest(self, job_id):
+    def _get_manifest_entries(self, job_id):
         """
-        Search for a packed manifest file matching the given SLURM job ID.
-        Manifests are stored as packed_{job_id}.manifest in task log directories.
+        Return cached list of (task_name, index) from the packed manifest for job_id.
+        Only caches positive results — if this task's logdir doesn't have the
+        manifest, the next task gets a chance to find it in its own logdir.
         """
+        if job_id in SLURMTask._manifest_cache:
+            return SLURMTask._manifest_cache[job_id]
         logdir = os.path.abspath("{0}/logs/".format(self.get_taskdir()))
         path = os.path.join(logdir, "packed_{0}.manifest".format(job_id))
+        entries = []
         if os.path.exists(path):
-            return path
-        return None
+            try:
+                with open(path) as f:
+                    for line in f:
+                        parts = line.strip().split("\t")
+                        if len(parts) >= 2:
+                            entries.append((parts[0], int(parts[1])))
+            except (IOError, OSError):
+                pass
+        if entries:
+            SLURMTask._manifest_cache[job_id] = entries
+        return entries
 
     def handle_condor_job(self, this_job_dict, out, fake=False, remove_running_x_hours=48.0, remove_held_x_hours=5.0):
         """

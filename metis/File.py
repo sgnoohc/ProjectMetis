@@ -90,9 +90,11 @@ class File(object):
         """
         Important NOTE:
         Below if statement basically caches the existence of
-        this file if True. Call the recheck() method to re-check.
+        this file. Call recheck() or recache_outputs() to refresh.
+        Only re-stats on first call (file_exists is None).
+        Once set to True/False, it stays cached until explicitly refreshed.
         """
-        if self.file_exists in [None, False]:
+        if self.file_exists is None:
             self.file_exists = os.path.exists(self.name)
         return self.file_exists
 

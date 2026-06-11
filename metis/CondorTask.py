@@ -286,25 +286,36 @@ class CondorTask(Task):
             self.logger.info("Tail root file {} removed".format(fname))
         self.io_mapping = new_mapping
 
-    def recache_outputs(self):
+    def recache_outputs(self, ttl=5.0):
         """
-        Reset file existence cache value for files that used to exist (maybe we
-        deleted and want to regenerate them). This saves time so we don't `ls`
-        every file every iteration of the submission loop
+        Refresh file existence cache for all outputs using a single listdir().
+        Pre-populates exists cache so subsequent out.exists() calls are instant.
+        Also detects files that were deleted since last check.
+
+        :param ttl: skip re-listing if called again within this many seconds
         """
+        now = time.time()
+        if hasattr(self, '_last_recache_time') and (now - self._last_recache_time) < ttl:
+            return 0
+
         nfiles_reset = 0
         if self.io_mapping:
             # get first output
             path_to_check = self.io_mapping[0][1].get_basepath()
-            fnames = []
+            fnames = set()
             if os.path.exists(path_to_check):
-                fnames = [os.path.normpath("{}/{}".format(path_to_check,x)) for x in os.listdir(path_to_check)]
+                fnames = set(os.path.normpath("{}/{}".format(path_to_check,x)) for x in os.listdir(path_to_check))
             for _, out in self.io_mapping:
-                if not out.is_fake() and out.exists() and (os.path.normpath(out.get_name()) not in fnames):
-                    # file apparently exists (according to cache), but not actually there, so reset cache
-                    out.recheck()
+                if out.is_fake():
+                    continue
+                was_existing = out.file_exists
+                now_exists = os.path.normpath(out.get_name()) in fnames
+                out.file_exists = now_exists
+                if was_existing and not now_exists:
                     out.set_status(Constants.INVALID)
                     nfiles_reset += 1
+
+        self._last_recache_time = time.time()
         return nfiles_reset
 
     def run(self, fake=False, optimizer=None):

@@ -1,5 +1,6 @@
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor
 
 import metis.Utils as Utils
 
@@ -40,18 +41,37 @@ class PackedSLURMSubmitter(object):
         :param max_submitted: max total SLURM jobs to have in queue (None = unlimited)
         """
         # Prepare inputs for tasks that haven't been prepared yet
-        for task in tasks:
+        ntasks = len(tasks)
+        n_to_prepare = sum(1 for t in tasks if (not t.prepared_inputs) or t.recopy_inputs)
+        if n_to_prepare > 0:
+            print("  [packed] Preparing inputs for {0}/{1} tasks ...".format(n_to_prepare, ntasks))
+        for i, task in enumerate(tasks):
             if (not task.prepared_inputs) or task.recopy_inputs:
+                print("\r  [packed] Preparing {0}/{1}: {2}".format(i + 1, ntasks, task.unique_name[:60]), end="", flush=True)
                 task.prepare_inputs()
+        if n_to_prepare > 0:
+            print()
 
         # Query squeue once and reuse for all tasks
+        print("  [packed] Querying squeue ...", flush=True)
         cached_all_jobs = Utils.slurm_q()
 
-        # Collect pending items across all tasks
+        # Collect pending items across all tasks (threaded — each task does NFS listdir)
         pending = []
-        for task in tasks:
+        print("  [packed] Collecting pending items from {0} tasks (threaded) ...".format(ntasks))
+        done_count = [0]  # mutable for closure
+
+        def _scan_task(task):
             items = task.get_pending_items(cached_all_jobs=cached_all_jobs)
-            pending.extend(items)
+            done_count[0] += 1
+            print("\r  [packed] Scanning {0}/{1}".format(done_count[0], ntasks), end="", flush=True)
+            return items
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            results = executor.map(_scan_task, tasks)
+            for items in results:
+                pending.extend(items)
+        print()
 
         if pending:
             print("  [packed] {0} pending sub-jobs across {1} tasks".format(
@@ -61,12 +81,18 @@ class PackedSLURMSubmitter(object):
 
             # Group into packs and submit
             submitted = 0
+            skipped = 0
+            # Check queue once before submission loop (avoid repeated squeue calls)
+            if max_submitted is not None:
+                current_queued = len(cached_all_jobs)
+                print("  [packed] Current queue: {0} jobs (limit {1})".format(current_queued, max_submitted))
             for i in range(0, len(pending), self.pack_size):
-                if max_submitted is not None:
-                    queued = Utils.slurm_q()
-                    if len(queued) >= max_submitted:
-                        self.logger.info("Queue limit reached ({0}), stopping submission".format(max_submitted))
-                        break
+                if max_submitted is not None and (current_queued + submitted) >= max_submitted:
+                    skipped = len(range(i, len(pending), self.pack_size))
+                    print("  [packed] Queue limit reached ({0} + {1} >= {2}), skipping {3} remaining pack(s)".format(
+                        current_queued, submitted, max_submitted, skipped))
+                    self.logger.info("Queue limit reached, stopping submission")
+                    break
 
                 pack = pending[i:i + self.pack_size]
                 succeeded = self._submit_pack(pack, fake=fake)
@@ -76,12 +102,21 @@ class PackedSLURMSubmitter(object):
             if submitted > 0:
                 self.logger.info("Submitted {0} packed SLURM job(s)".format(submitted))
 
-        # Handle completion / backup for all tasks
-        for task in tasks:
+        # Handle completion / backup for all tasks (threaded)
+        print("  [packed] Finalizing {0} tasks (threaded) ...".format(ntasks))
+        done_final = [0]
+
+        def _finalize_task(task):
             task.try_to_complete()
             if task.complete():
                 task.finalize()
             task.backup()
+            done_final[0] += 1
+            print("\r  [packed] Finalizing {0}/{1}".format(done_final[0], ntasks), end="", flush=True)
+
+        with ThreadPoolExecutor(max_workers=16) as executor:
+            list(executor.map(_finalize_task, tasks))
+        print()
 
     def _submit_pack(self, pack, fake=False):
         """
